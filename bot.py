@@ -50,15 +50,16 @@ async def get_user_level(user_id: int):
 
         return row
 
+# ====================== FIXED: add_xp (preserves sigils + last_daily) ======================
 async def add_xp(user_id: int, amount: int):
-    xp, level = await get_user_level(user_id)
+    xp, level, _ = await get_user_level(user_id)
     new_xp = xp + amount
     new_level = int(math.sqrt(new_xp / 100)) + 1
 
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
-            "INSERT OR REPLACE INTO levels (user_id, xp, level) VALUES (?, ?, ?)",
-            (user_id, new_xp, new_level)
+            "UPDATE levels SET xp = ?, level = ? WHERE user_id = ?",
+            (new_xp, new_level, user_id)
         )
         await db.commit()
 
@@ -109,7 +110,6 @@ intents.members = True
 async def get_sigils(user_id: int):
     xp, level, sigils = await get_user_level(user_id)
     return sigils
-
 
 async def update_sigils(user_id: int, amount: int):
     xp, level, sigils = await get_user_level(user_id)
@@ -192,7 +192,7 @@ async def on_message(message):
                 color=0x00ff88
             )
             embed.add_field(name="Total XP", value=f"{new_xp:,}", inline=True)
-        await level_up_channel.send(embed=embed)
+            await level_up_channel.send(embed=embed)
 
     await bot.process_commands(message)
 
@@ -209,7 +209,7 @@ async def help_command(ctx):
 
     embed = discord.Embed(
         title="🤖 Viltrumite Bot",
-        description="Power, Token & Leveling system",
+        description="Power, Token, Leveling system $ Sigils",
         color=0x00ff88
     )
     embed.add_field(
@@ -225,8 +225,7 @@ async def help_command(ctx):
     embed.set_footer(text="Leveling works by chatting | Level-ups appear in #level-up")
     await ctx.send(embed=embed)
 
-# ====================== RANK COMMAND ======================
-
+# ====================== SIGILS COMMAND ======================
 @bot.command()
 async def sigils(ctx):
     balance = await get_sigils(ctx.author.id)
@@ -239,7 +238,7 @@ async def sigils(ctx):
 
     await ctx.send(embed=embed)
 
-
+# ====================== GIVE SIGILS (ADMIN) ======================
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def give(ctx, member: discord.Member, amount: int):
@@ -263,8 +262,7 @@ async def give_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("❌ You need Administrator permission to use this command.")
 
-
-
+# ====================== DAILY COMMAND ======================
 @bot.command()
 async def daily(ctx):
     xp, level, sigils = await get_user_level(ctx.author.id)
@@ -303,7 +301,7 @@ async def daily(ctx):
 # ====================== RANK COMMAND ======================
 @bot.command(name='rank')
 async def rank(ctx):
-    xp, level = await get_user_level(ctx.author.id)   # ← This line was missing
+    xp, level, _ = await get_user_level(ctx.author.id)
     
     current_level_xp = ((level - 1) ** 2) * 100
     next_level_xp = (level ** 2) * 100
@@ -344,9 +342,7 @@ async def leaderboard(ctx):
     embed.description = desc
     await ctx.send(embed=embed)
 
-# ====================== YOUR ORIGINAL COMMANDS ======================
-# Paste your full .pcalculate and .tcalculate here (unchanged)
-
+# ====================== PCALCULATE COMMAND ======================
 @bot.command(name='pcalculate')
 async def pcalculate(ctx):
     if not is_commands_channel(ctx):
@@ -419,6 +415,7 @@ async def pcalculate(ctx):
     except Exception:
         await ctx.send("❌ Something went wrong.")
 
+# ====================== TCALCULATE COMMAND ======================
 @bot.command(name='tcalculate')
 async def tcalculate(ctx):
     if not is_commands_channel(ctx):
@@ -483,5 +480,6 @@ async def tcalculate(ctx):
         await ctx.send(f"❌ Invalid number format: {e}\nPlease try `.tcalculate` again.")
     except Exception:
         await ctx.send("❌ Something went wrong.")
+
 # ====================== RUN BOT ======================
 bot.run(TOKEN)

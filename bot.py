@@ -261,7 +261,7 @@ async def milestones(ctx):
     
     embed.add_field(
         name="💡 Note",
-        value="Milestones are weekly bonuses.\n"
+        value="Milestones are weekly bonuses.",
         inline=False
     )
     embed.set_footer(text="Total sigils = (1M rule) + (milestone bonuses)")

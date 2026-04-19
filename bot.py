@@ -14,8 +14,9 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 
 if not TOKEN:
-    print("❌ ERROR: No TOKEN found in .env file!")
-    exit()
+    raise Exception("No TOKEN found in environment variables!")
+
+client.run(TOKEN)
 
 # ====================== DATABASE SETUP ======================
 DB_NAME = "levels.db"

@@ -25,7 +25,9 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS levels (
                 user_id INTEGER PRIMARY KEY,
                 xp INTEGER DEFAULT 0,
-                level INTEGER DEFAULT 1
+                level INTEGER DEFAULT 1,
+                sigils INTEGER DEFAULT 0,
+                last_daily TEXT
             )
         """)
         await db.commit()
@@ -33,18 +35,18 @@ async def init_db():
 async def get_user_level(user_id: int):
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute(
-            "SELECT xp, level FROM levels WHERE user_id = ?",
+            "SELECT xp, level, sigils FROM levels WHERE user_id = ?",
             (user_id,)
         ) as cursor:
             row = await cursor.fetchone()
 
         if row is None:
             await db.execute(
-                "INSERT INTO levels (user_id, xp, level) VALUES (?, 0, 1)",
+                "INSERT INTO levels (user_id, xp, level, sigils, last_daily) VALUES (?, 0, 1, 0, NULL)",
                 (user_id,)
             )
             await db.commit()
-            return 0, 1
+            return 0, 1, 0
 
         return row
 
@@ -103,6 +105,25 @@ def progress_bar(current, total, length=10):
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+
+async def get_sigils(user_id: int):
+    xp, level, sigils = await get_user_level(user_id)
+    return sigils
+
+
+async def update_sigils(user_id: int, amount: int):
+    xp, level, sigils = await get_user_level(user_id)
+    new_balance = sigils + amount
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("""
+            UPDATE levels
+            SET sigils = ?
+            WHERE user_id = ?
+        """, (new_balance, user_id))
+        await db.commit()
+
+    return new_balance
 
 bot = commands.Bot(command_prefix='.', intents=intents, help_command=None)
 
@@ -196,13 +217,89 @@ async def help_command(ctx):
         value="`.pcalculate` - Power time calculator\n"
               "`.tcalculate` - Token time calculator\n"
               "`.rank` - Show your current level & progress\n"
-              "`.leaderboard` - Top 10 users on the server",
+              "`.leaderboard` - Top 10 users on the server\n"
+              "`.sigils` - Check your Iron Sigils balance\n"
+              "`.daily` - Claim your daily Iron Sigils",
         inline=False
     )
     embed.set_footer(text="Leveling works by chatting | Level-ups appear in #level-up")
     await ctx.send(embed=embed)
 
 # ====================== RANK COMMAND ======================
+
+@bot.command()
+async def sigils(ctx):
+    balance = await get_sigils(ctx.author.id)
+
+    embed = discord.Embed(
+        title="🛡️ Iron Sigils",
+        description=f"You own **{balance:,} 🛡️ Sigils**",
+        color=0x00ff88
+    )
+
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def give(ctx, member: discord.Member, amount: int):
+    if amount <= 0:
+        return await ctx.send("❌ Amount must be positive!")
+
+    new_balance = await update_sigils(member.id, amount)
+
+    embed = discord.Embed(
+        title="🛡️ Sigils Given",
+        description=f"{ctx.author.mention} gave {member.mention} **{amount:,} 🛡️ Sigils**",
+        color=0xffd700
+    )
+
+    embed.add_field(name="New Balance", value=f"{new_balance:,} 🛡️ Sigils")
+
+    await ctx.send(embed=embed)
+
+@give.error
+async def give_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You need Administrator permission to use this command.")
+
+
+
+@bot.command()
+async def daily(ctx):
+    xp, level, sigils = await get_user_level(ctx.author.id)
+
+    now = datetime.utcnow()
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            "SELECT last_daily FROM levels WHERE user_id = ?",
+            (ctx.author.id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if row and row[0]:
+            last = datetime.fromisoformat(row[0])
+            if now - last < timedelta(hours=24):
+                remaining = timedelta(hours=24) - (now - last)
+                hours = remaining.seconds // 3600
+                minutes = (remaining.seconds // 60) % 60
+                return await ctx.send(f"⏳ Daily already claimed. Try again in {hours}h {minutes}m")
+
+        reward = random.randint(100, 500)
+
+        await update_sigils(ctx.author.id, reward)
+
+        await db.execute("""
+            UPDATE levels
+            SET last_daily = ?
+            WHERE user_id = ?
+        """, (now.isoformat(), ctx.author.id))
+
+        await db.commit()
+
+    await ctx.send(f"🎁 You received **{reward} 🛡️ Iron Sigils**!")
+
 # ====================== RANK COMMAND ======================
 @bot.command(name='rank')
 async def rank(ctx):

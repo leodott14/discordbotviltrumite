@@ -194,9 +194,80 @@ async def help_command(ctx):
         return
     # (same help embed as before)
     embed = discord.Embed(title="🤖 Viltrumite Bot", description="Power, Token, Leveling system & Sigils", color=0x00ff88)
-    embed.add_field(name="📋 Available Commands", value="`.pcalculate` - Power time calculator\n`.tcalculate` - Token time calculator\n`.rank` - Show your current level & progress\n`.leaderboard` - Top 10 users\n`.sigils` - Check your Iron Sigils\n`.daily` - Claim daily Iron Sigils", inline=False)
+    embed.add_field(name="📋 Available Commands", value="`.pcalculate` - Power time calculator\n"
+      "`.tcalculate` - Token time calculator\n"
+      "`.rank` - Show your current level & progress\n"
+      "`.leaderboard` - Top 10 users on the server\n"
+      "`.sigils` - Check your Iron Sigils balance\n"
+      "`.daily` - Claim your daily Iron Sigils\n"
+      "`.sigilsinfo` - How sigils work from donations\n"
+      "`.milestones` - All donation milestone rewards", 
+      inline=False)
     embed.set_footer(text="Leveling works by chatting | Level-ups appear in #level-up")
     await ctx.send(embed=embed)
+
+# ====================== SIGILS INFO COMMAND ======================
+@bot.command(name='sigilsinfo')
+async def sigilsinfo(ctx):
+    if not is_commands_channel(ctx):
+        await ctx.send("❌ This command can only be used in the **#commands** channel!")
+        return
+
+    embed = discord.Embed(
+        title="🛡️ Sigils Information",
+        description="**How to earn Sigils from Token Donations**",
+        color=0x00ff88
+    )
+    embed.add_field(
+        name="💰 Main Rule",
+        value="For every **1,000,000 (1M)** donated tokens you receive **100 Sigils**.",
+        inline=False
+    )
+    embed.add_field(
+        name="🏆 Milestones",
+        value="You also get **bonus sigils** when you hit these contribution milestones:\n"
+              "• `100k` • `350k` • `500k` • `700k` • `1M` • `1.5M`\n\n"
+              "Type `.milestones` to see exactly how many sigils each milestone gives!",
+        inline=False
+    )
+    embed.add_field(
+        name="🔄 Redemption",
+        value="Once you reach **50,000 (50k) Sigils**, you can redeem **1 week of Titan or Deluxe Gamepass**.",
+        inline=False
+    )
+    embed.set_footer(text="Use .milestones for full list | Donations are tracked by staff")
+    
+    await ctx.send(embed=embed)
+
+
+# ====================== MILESTONES COMMAND ======================
+@bot.command(name='milestones')
+async def milestones(ctx):
+    if not is_commands_channel(ctx):
+        await ctx.send("❌ This command can only be used in the **#commands** channel!")
+        return
+
+    embed = discord.Embed(
+        title="🏆 Token Donation Milestones",
+        description="Every time you hit one of these totals in donated tokens, you get the listed sigils **in addition** to the normal 100 sigils per 1M.",
+        color=0x00ff88
+    )
+    embed.add_field(name="100K",  value="**+40 Sigils**",  inline=True)
+    embed.add_field(name="350K", value="**+125 Sigils**", inline=True)
+    embed.add_field(name="500K", value="**+175 Sigils**", inline=True)
+    embed.add_field(name="700K", value="**+250 Sigils**", inline=True)
+    embed.add_field(name="1M",   value="**+300 Sigils**", inline=True)
+    embed.add_field(name="1.5M", value="**+400 Sigils**", inline=True)
+    
+    embed.add_field(
+        name="💡 Note",
+        value="Milestones are weekly bonuses.\n"
+        inline=False
+    )
+    embed.set_footer(text="Total sigils = (1M rule) + (milestone bonuses)")
+    
+    await ctx.send(embed=embed)
+
 
 @bot.command()
 async def sigils(ctx):

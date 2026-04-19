@@ -296,16 +296,136 @@ async def pcalculate(ctx):
     if not is_commands_channel(ctx):
         await ctx.send("❌ This command can only be used in the **#commands** channel!")
         return
-    # ... (your original pcalculate code here - unchanged)
-    await ctx.send("🔢 **Power Calculator started!** (same as before)")
+    await ctx.send("🔢 **Power Calculator started!**\n\n"
+                   "**1.** What is your **current power**?\n"
+                   "Example: `19.12T`, `5Qa`, `100Sx`, or just a number")
+
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+
+    try:
+        msg = await bot.wait_for('message', check=check, timeout=180)
+        current = parse_game_number(msg.content)
+
+        await ctx.send("**2.** What is your **power gain per tick**?\n"
+                       "Example: `1.5Qa`, `25B`, `500T`")
+
+        msg = await bot.wait_for('message', check=check, timeout=180)
+        gain_per_tick = parse_game_number(msg.content)
+
+        await ctx.send("**3.** What is your **tick rate** in seconds?\n"
+                       "Example: `0.264` or `0.264s`")
+
+        msg = await bot.wait_for('message', check=check, timeout=180)
+        tick_rate = float(msg.content.strip().lower().replace("s", "").replace(" ", ""))
+
+        await ctx.send("**4.** What is your **goal power**?\n"
+                       "Example: `10Qa`, `100Sx`, `1.5Qi`")
+
+        msg = await bot.wait_for('message', check=check, timeout=180)
+        goal = parse_game_number(msg.content)
+
+        if goal <= current:
+            await ctx.send("🎉 You have already reached or passed your goal!")
+            return
+
+        if gain_per_tick <= 0 or tick_rate <= 0:
+            await ctx.send("❌ Gain per tick and tick rate must be greater than 0!")
+            return
+
+        needed = goal - current
+        ticks_needed = math.ceil(needed / gain_per_tick)
+        total_seconds = ticks_needed * tick_rate
+
+        if total_seconds < 60:
+            time_str = f"{total_seconds:.1f} seconds"
+        elif total_seconds < 3600:
+            time_str = f"{total_seconds/60:.2f} minutes"
+        elif total_seconds < 86400:
+            time_str = f"{total_seconds/3600:.2f} hours"
+        else:
+            time_str = f"{total_seconds/86400:.2f} days"
+
+        embed = discord.Embed(title="⏳ Time to Reach Power Goal", color=0x00ff88)
+        embed.add_field(name="Current Power", value=format_game_number(current), inline=True)
+        embed.add_field(name="Gain per Tick", value=format_game_number(gain_per_tick), inline=True)
+        embed.add_field(name="Tick Rate", value=f"{tick_rate} s", inline=True)
+        embed.add_field(name="Goal Power", value=format_game_number(goal), inline=True)
+        embed.add_field(name="Ticks Needed", value=f"{ticks_needed:,}", inline=False)
+        embed.add_field(name="Estimated Time", value=f"**{time_str}**", inline=False)
+
+        await ctx.send(embed=embed)
+
+    except asyncio.TimeoutError:
+        await ctx.send("⏰ You took too long to reply. Type `.pcalculate` again.")
+    except ValueError as e:
+        await ctx.send(f"❌ Invalid number format: {e}\nPlease try `.pcalculate` again.")
+    except Exception:
+        await ctx.send("❌ Something went wrong.")
 
 @bot.command(name='tcalculate')
 async def tcalculate(ctx):
     if not is_commands_channel(ctx):
         await ctx.send("❌ This command can only be used in the **#commands** channel!")
         return
-    # ... (your original tcalculate code here - unchanged)
-    await ctx.send("🔢 **Token Calculator started!** (same as before)")
+    await ctx.send("🔢 **Token Calculator started!**\n\n"
+                   "**1.** How many **tokens do you earn per tick**?\n"
+                   "Example: `150`, `2500`, `25162`")
 
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+
+    try:
+        msg = await bot.wait_for('message', check=check, timeout=180)
+        tokens_per_tick = parse_game_number(msg.content)
+
+        await ctx.send("**2.** What is your **tick rate** (speed)?\n"
+                       "Example: `32s`, `60`, `35.5s`")
+
+        msg = await bot.wait_for('message', check=check, timeout=180)
+        tick_rate = float(msg.content.strip().lower().replace("s", "").replace(" ", ""))
+
+        await ctx.send("**3.** How many **tokens do you need** (goal)?\n"
+                       "Example: `50000`, `605K`, `32.5M`")
+
+        msg = await bot.wait_for('message', check=check, timeout=180)
+        goal = parse_game_number(msg.content)
+
+        if goal <= tokens_per_tick:
+            await ctx.send("🎉 You can already reach your token goal in 1 tick!")
+            return
+
+        if tokens_per_tick <= 0 or tick_rate <= 0:
+            await ctx.send("❌ Tokens per tick and tick rate must be greater than 0!")
+            return
+
+        needed = goal 
+        ticks_needed = math.ceil(needed / tokens_per_tick)
+        total_seconds = ticks_needed * tick_rate
+
+        if total_seconds < 60:
+            time_str = f"{total_seconds:.1f} seconds"
+        elif total_seconds < 3600:
+            time_str = f"{total_seconds/60:.2f} minutes"
+        elif total_seconds < 86400:
+            time_str = f"{total_seconds/3600:.2f} hours"
+        else:
+            time_str = f"{total_seconds/86400:.2f} days"
+
+        embed = discord.Embed(title="⏳ Time to Reach Token Goal", color=0x0099ff)
+        embed.add_field(name="Tokens per Tick", value=format_game_number(tokens_per_tick), inline=True)
+        embed.add_field(name="Tick Rate", value=f"{tick_rate} s", inline=True)
+        embed.add_field(name="Token Goal", value=format_game_number(goal), inline=True)
+        embed.add_field(name="Ticks Needed", value=f"{ticks_needed:,}", inline=False)
+        embed.add_field(name="Estimated Time", value=f"**{time_str}**", inline=False)
+
+        await ctx.send(embed=embed)
+
+    except asyncio.TimeoutError:
+        await ctx.send("⏰ You took too long to reply. Type `.tcalculate` again.")
+    except ValueError as e:
+        await ctx.send(f"❌ Invalid number format: {e}\nPlease try `.tcalculate` again.")
+    except Exception:
+        await ctx.send("❌ Something went wrong.")
 # ====================== RUN BOT ======================
 bot.run(TOKEN)

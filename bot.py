@@ -16,8 +16,6 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise Exception("No TOKEN found in environment variables!")
 
-client.run(TOKEN)
-
 # ====================== DATABASE SETUP ======================
 DB_NAME = "levels.db"
 

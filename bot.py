@@ -580,6 +580,67 @@ async def leaderboard(ctx):
     embed.description = desc
     await ctx.send(embed=embed)
 
+@bot.command(name='sigilsleaderboard', aliases=['sbleaderboard', 'sblb'])
+async def sigilsleaderboard(ctx):
+    if not is_commands_channel(ctx):
+        await ctx.send("❌ This command can only be used in the **#commands** channel!")
+        return
+    
+    if not db_ready:
+        await ctx.send("⏳ Database is still initializing, please wait a moment...")
+        return
+    
+    # Show server-specific or global? Default to server-only for better UX
+    async with db_pool.acquire() as conn:
+        # Get top 10 from this server only
+        server_members = [member.id for member in ctx.guild.members]
+        
+        if not server_members:
+            await ctx.send("❌ Could not fetch server members!")
+            return
+        
+        # Query using the list of member IDs
+        rows = await conn.fetch(
+            "SELECT user_id, sigils FROM levels WHERE user_id = ANY($1) ORDER BY sigils DESC LIMIT 10",
+            server_members
+        )
+    
+    if not rows or all(row['sigils'] == 0 for row in rows):
+        return await ctx.send(f"📊 No one in **{ctx.guild.name}** has any Sigils yet! Be the first to earn some!")
+
+    embed = discord.Embed(
+        title=f"🛡️ Iron Sigils Leaderboard - {ctx.guild.name}", 
+        description="Top 10 Richest Members",
+        color=0xFFD700
+    )
+    
+    leaderboard_text = ""
+    for i, row in enumerate(rows, 1):
+        member = ctx.guild.get_member(row['user_id'])
+        name = member.display_name if member else f"Unknown User"
+        sigils = row['sigils']
+        
+        # Add emojis for top 3
+        if i == 1:
+            medal = "👑"
+        elif i == 2:
+            medal = "🥈"
+        elif i == 3:
+            medal = "🥉"
+        else:
+            medal = f"{i}."
+        
+        leaderboard_text += f"{medal} **{name}** - {sigils:,} 🛡️\n"
+    
+    embed.description = leaderboard_text
+    
+    # Add total sigils in this server
+    total_row = await conn.fetchval("SELECT SUM(sigils) FROM levels WHERE user_id = ANY($1)", server_members)
+    if total_row and total_row > 0:
+        embed.set_footer(text=f"Total Sigils in {ctx.guild.name}: {total_row:,}")
+    
+    await ctx.send(embed=embed)
+
 # ====================== CALCULATORS ======================
 @bot.command(name='pcalculate')
 async def pcalculate(ctx):

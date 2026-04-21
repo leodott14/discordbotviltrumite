@@ -401,6 +401,35 @@ async def checksigils(ctx, member: discord.Member = None):
 
     await ctx.send(embed=embed)
 
+@bot.command(name='xpgive')
+@commands.has_permissions(administrator=True)
+async def xpgive(ctx, member: discord.Member, amount: int):
+    if amount <= 0:
+        return await ctx.send("❌ Amount must be greater than 0!")
+
+    # Add XP using your existing system
+    new_xp, new_level, leveled_up = await add_xp(member.id, amount)
+
+    embed = discord.Embed(
+        title="⚡ XP Given",
+        description=f"{ctx.author.mention} gave {member.mention} **{amount:,} XP**",
+        color=0x00ff88
+    )
+
+    embed.add_field(name="New XP", value=f"{new_xp:,}", inline=True)
+    embed.add_field(name="Level", value=f"{new_level}", inline=True)
+
+    if leveled_up:
+        embed.add_field(name="🎉 Level Up!", value=f"{member.mention} reached **Level {new_level}**!", inline=False)
+
+    await ctx.send(embed=embed)
+@xpgive.error
+async def xpgive_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You need Administrator permission.")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("❌ Usage: `.xpgive @user <amount>`")
+
 @bot.command(name='rank')
 async def rank(ctx):
     if not is_commands_channel(ctx):

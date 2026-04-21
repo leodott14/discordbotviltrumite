@@ -248,8 +248,8 @@ async def milestones(ctx):
         return
 
     embed = discord.Embed(
-        title="🏆 Token Donation Milestones",
-        description="Every time you hit one of these totals in donated tokens, you get the listed sigils **in addition** to the normal 100 sigils per 1M.",
+        title="🏆 Token Contribution Milestones",
+        description="Every time you hit one of these totals in contribution towards the clan.",
         color=0x00ff88
     )
     embed.add_field(name="100K",  value="**+40 Sigils**",  inline=True)
@@ -264,7 +264,7 @@ async def milestones(ctx):
         value="Milestones are weekly bonuses.",
         inline=False
     )
-    embed.set_footer(text="Total sigils = (1M rule) + (milestone bonuses)")
+    embed.set_footer(text="Send a screenshot of your contributions at every milestone reached.")
     
     await ctx.send(embed=embed)
 
@@ -303,6 +303,9 @@ async def give_error(ctx, error):
 
 @bot.command()
 async def daily(ctx):
+    if not is_commands_channel(ctx):
+        await ctx.send("❌ This command can only be used in the **#commands** channel!")
+        return
     now = datetime.utcnow()
     async with aiosqlite.connect(DB_NAME) as db:
         # Ensure user exists
@@ -328,8 +331,79 @@ async def daily(ctx):
 
     await ctx.send(f"🎁 You received **{reward} 🛡️ Iron Sigils**!")
 
+@bot.command(name='gamble')
+async def gamble(ctx, amount: str):
+    if not is_commands_channel(ctx):
+        await ctx.send("❌ This command can only be used in the **#commands** channel!")
+        return
+
+    try:
+        bet = int(parse_game_number(amount))
+    except:
+        return await ctx.send("❌ Invalid bet amount!")
+
+    if bet <= 0:
+        return await ctx.send("❌ Bet must be greater than 0!")
+
+    balance = await get_sigils(ctx.author.id)
+
+    if bet > balance:
+        return await ctx.send(f"❌ You only have **{balance:,} 🛡️ Sigils**!")
+
+    win_chance = 0.45  # 45% chance to win
+    multiplier = 2     # double your bet if you win
+
+    roll = random.random()
+
+    if roll < win_chance:
+        winnings = int(bet * multiplier)
+        await update_sigils(ctx.author.id, winnings - bet)
+
+        embed = discord.Embed(
+            title="🎉 You Won!",
+            description=f"You bet **{bet:,}** and won **{winnings:,} 🛡️ Sigils**!",
+            color=0x00ff88
+        )
+    else:
+        await update_sigils(ctx.author.id, -bet)
+
+        embed = discord.Embed(
+            title="💀 You Lost!",
+            description=f"You lost **{bet:,} 🛡️ Sigils**... better luck next time!",
+            color=0xff4444
+        )
+
+    new_balance = await get_sigils(ctx.author.id)
+    embed.add_field(name="New Balance", value=f"{new_balance:,} 🛡️ Sigils")
+
+    await ctx.send(embed=embed)
+
+@bot.command(name='checksigils')
+async def checksigils(ctx, member: discord.Member = None):
+    if not is_commands_channel(ctx):
+        await ctx.send("❌ This command can only be used in the **#commands** channel!")
+        return
+
+    # If no user mentioned, default to yourself
+    target = member or ctx.author
+
+    balance = await get_sigils(target.id)
+
+    embed = discord.Embed(
+        title="🛡️ Sigils Balance",
+        description=f"{target.mention} owns **{balance:,} 🛡️ Sigils**",
+        color=0x00ff88
+    )
+
+    embed.set_thumbnail(url=target.display_avatar.url)
+
+    await ctx.send(embed=embed)
+
 @bot.command(name='rank')
 async def rank(ctx):
+    if not is_commands_channel(ctx):
+        await ctx.send("❌ This command can only be used in the **#commands** channel!")
+        return
     xp, level, _ = await get_user_level(ctx.author.id)
     current_level_xp = ((level - 1) ** 2) * 100
     next_level_xp = (level ** 2) * 100
@@ -346,6 +420,9 @@ async def rank(ctx):
 
 @bot.command(name='leaderboard')
 async def leaderboard(ctx):
+    if not is_commands_channel(ctx):
+        await ctx.send("❌ This command can only be used in the **#commands** channel!")
+        return
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT user_id, xp, level FROM levels ORDER BY xp DESC LIMIT 10") as cursor:
             rows = await cursor.fetchall()
@@ -440,23 +517,28 @@ async def tcalculate(ctx):
         await ctx.send("❌ This command can only be used in the **#commands** channel!")
         return
     await ctx.send("🔢 **Token Calculator started!**\n\n"
-                   "**1.** How many **tokens do you earn per tick**?\n"
-                   "Example: `150`, `2500`, `25162`")
-
+                   "**1.** What is your **current token count**?\n"
+                   "Example: `50000`, `25k`, `2.5M`, or just a number")
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
-
+    
     try:
         msg = await bot.wait_for('message', check=check, timeout=180)
         tokens_per_tick = parse_game_number(msg.content)
 
-        await ctx.send("**2.** What is your **tick rate** (speed)?\n"
+        await ctx.send("**2.** How many **tokens do you earn per tick**?\n"
+                       "Example: `150`, `2500`, `27162`")
+        
+        msg = await bot.wait_for('message', check=check, timeout=180)
+        tokens_per_tick = parse_game_number(msg.content)
+
+        await ctx.send("**3.** What is your **tick rate** (speed)?\n"
                        "Example: `32s`, `60`, `35.5s`")
 
         msg = await bot.wait_for('message', check=check, timeout=180)
         tick_rate = float(msg.content.strip().lower().replace("s", "").replace(" ", ""))
 
-        await ctx.send("**3.** How many **tokens do you need** (goal)?\n"
+        await ctx.send("**4.** How many **tokens do you need** (goal)?\n"
                        "Example: `50000`, `605K`, `32.5M`")
 
         msg = await bot.wait_for('message', check=check, timeout=180)

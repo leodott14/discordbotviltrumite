@@ -42,6 +42,9 @@ async def init_db():
 
 
 async def get_user_level(user_id: int):
+    if db_pool is None:
+        raise Exception("DB not initialized yet!")
+
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT xp, level, sigils FROM levels WHERE user_id = $1",
@@ -137,21 +140,6 @@ ROLE_PRIORITY = {
     "Elite": 2,
     "Viltrumite": 1
 }
-
-async def init_db():
-    print("📦 Initializing database...")  # 👈 add this
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS levels (
-                user_id INTEGER PRIMARY KEY,
-                xp INTEGER DEFAULT 0,
-                level INTEGER DEFAULT 1,
-                sigils INTEGER DEFAULT 0,
-                last_daily TEXT
-            )
-        """)
-        await db.commit()
-    print("✅ Database ready!")  # 👈 add this
 
 # ====================== ERROR HANDLER (so you see what goes wrong) ======================
 @bot.event

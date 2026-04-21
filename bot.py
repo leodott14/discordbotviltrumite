@@ -668,56 +668,44 @@ async def slots(ctx, amount: str):
 
     emojis = ["🍒", "🍋", "🍇", "💎", "⭐", "7️⃣"]
 
-    # 🎯 WEIGHTED ODDS (THIS is what makes it hard)
-    weights = [
-        30,  # 🍒 common
-        30,  # 🍋 common
-        25,  # 🍇 common
-        8,   # ⭐ rare
-        5,   # 7️⃣ very rare
-        2    # 💎 ultra rare
-    ]
+    weights = [35, 30, 22, 8, 4, 1]  # even harsher rarity
 
-    def weighted_choice():
-        return random.choices(emojis, weights=weights, k=1)[0]
-
-    reel1 = weighted_choice()
-    reel2 = weighted_choice()
-    reel3 = weighted_choice()
+    reel1 = random.choices(emojis, weights=weights, k=1)[0]
+    reel2 = random.choices(emojis, weights=weights, k=1)[0]
+    reel3 = random.choices(emojis, weights=weights, k=1)[0]
 
     result = f"{reel1} | {reel2} | {reel3}"
 
-    # 🎯 VERY STRICT WIN CONDITIONS
+    # 💎 TRIPLE MATCH (very rare, reduced payout)
     if reel1 == reel2 == reel3:
         if reel1 == "💎":
-            multiplier = 8
-        elif reel1 == "7️⃣":
             multiplier = 6
-        elif reel1 == "⭐":
+        elif reel1 == "7️⃣":
             multiplier = 5
-        else:
+        elif reel1 == "⭐":
             multiplier = 4
+        else:
+            multiplier = 3
 
         winnings = bet * multiplier
         await update_sigils(ctx.author.id, winnings - bet)
 
         embed = discord.Embed(
-            title="🎰 JACKPOT!",
+            title="🎰 BIG WIN!",
             description=f"**{result}**\nYou won **{winnings:,} 🛡️ Sigils!**",
             color=0x00ff88
         )
 
+    # 🔁 PAIR = NO PROFIT (IMPORTANT FIX)
     elif reel1 == reel2 or reel2 == reel3 or reel1 == reel3:
-        # ⚠️ weak payout so it's still mostly loss
-        winnings = int(bet * 1.2)
-        await update_sigils(ctx.author.id, winnings - bet)
-
+        # no change to balance
         embed = discord.Embed(
-            title="😐 Small Win",
-            description=f"**{result}**\nYou barely broke even: **+{winnings - bet:,}**",
+            title="😐 Neutral Spin",
+            description=f"**{result}**\nNo win, no loss.",
             color=0xffd700
         )
 
+    # 💀 LOSS (most outcomes)
     else:
         await update_sigils(ctx.author.id, -bet)
 

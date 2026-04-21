@@ -18,12 +18,16 @@ if not TOKEN:
     raise Exception("No TOKEN found in environment variables!")
 
 # ====================== DATABASE SETUP ======================
+db_ready = False
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 db_pool = None
 
 async def init_db():
-    global db_pool
+    global db_pool, db_ready
+
+    print("📦 Connecting to PostgreSQL...")
 
     db_pool = await asyncpg.create_pool(DATABASE_URL)
 
@@ -38,12 +42,12 @@ async def init_db():
             )
         """)
 
+    db_ready = True
     print("✅ PostgreSQL ready!")
 
 
 async def get_user_level(user_id: int):
-    if db_pool is None:
-        raise Exception("DB not initialized yet!")
+    await ensure_db()
 
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -62,6 +66,15 @@ async def get_user_level(user_id: int):
             return 0, 1, 0
 
         return row["xp"], row["level"], row["sigils"]
+    
+async def ensure_db():
+    global db_pool, db_ready
+
+    if db_pool is None:
+        raise Exception("DB pool not initialized yet")
+
+    if not db_ready:
+        raise Exception("DB still initializing")
 
 async def add_xp(user_id: int, amount: int):
     xp, level, sigils = await get_user_level(user_id)
@@ -197,9 +210,15 @@ async def on_message(message):
 
 @bot.event
 async def on_ready():
+    global db_ready
+
     if db_pool is None:
         await init_db()
 
+    if db_ready:
+        return
+
+    db_ready = True
     print(f"✅ Bot online as {bot.user}")
 
 # ====================== HELPER ======================
@@ -333,32 +352,44 @@ async def daily(ctx):
     if not is_commands_channel(ctx):
         await ctx.send("❌ This command can only be used in the **#commands** channel!")
         return
+
+    await ensure_db()
+
     now = datetime.utcnow()
+
     async with db_pool.acquire() as conn:
-        await get_user_level(ctx.author.id)
 
-    row = await conn.fetchrow(
-        "SELECT last_daily FROM levels WHERE user_id = $1",
-        ctx.author.id
-    )
+        # make sure user exists
+        await conn.execute("""
+            INSERT INTO levels (user_id, xp, level, sigils, last_daily)
+            VALUES ($1, 0, 1, 0, NULL)
+            ON CONFLICT (user_id) DO NOTHING
+        """, ctx.author.id)
 
-    if row and row["last_daily"]:
-        last = datetime.fromisoformat(row["last_daily"])
-        if now - last < timedelta(hours=24):
-            remaining = timedelta(hours=24) - (now - last)
-            hours = remaining.seconds // 3600
-            minutes = (remaining.seconds // 60) % 60
-            return await ctx.send(f"⏳ Daily already claimed. Try again in {hours}h {minutes}m")
+        row = await conn.fetchrow(
+            "SELECT last_daily FROM levels WHERE user_id = $1",
+            ctx.author.id
+        )
 
-    reward = random.randint(100, 500)
+        if row and row["last_daily"]:
+            last = datetime.fromisoformat(row["last_daily"])
 
-    await update_sigils(ctx.author.id, reward)
+            if now - last < timedelta(hours=24):
+                remaining = timedelta(hours=24) - (now - last)
+                hours = remaining.seconds // 3600
+                minutes = (remaining.seconds // 60) % 60
+                return await ctx.send(
+                    f"⏳ Daily already claimed. Try again in {hours}h {minutes}m"
+                )
 
-    await conn.execute(
-        "UPDATE levels SET last_daily = $1 WHERE user_id = $2",
-        now.isoformat(),
-        ctx.author.id
-    )
+        reward = random.randint(100, 500)
+
+        await conn.execute(
+            "UPDATE levels SET sigils = sigils + $1, last_daily = $2 WHERE user_id = $3",
+            reward,
+            now.isoformat(),
+            ctx.author.id
+        )
 
     await ctx.send(f"🎁 You received **{reward} 🛡️ Iron Sigils**!")
 

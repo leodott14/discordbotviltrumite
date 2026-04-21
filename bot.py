@@ -201,7 +201,9 @@ async def help_command(ctx):
       "`.sigils` - Check your Iron Sigils balance\n"
       "`.daily` - Claim your daily Iron Sigils\n"
       "`.sigilsinfo` - How sigils work from donations\n"
-      "`.milestones` - All donation milestone rewards", 
+      "`.milestones` - All donation milestone rewards\n"
+      "`.gamble` - Gamble your sigils for a chance to win more!\n"
+      "`.checksigils` - Check your sigils balance",
       inline=False)
     embed.set_footer(text="Leveling works by chatting | Level-ups appear in #level-up")
     await ctx.send(embed=embed)

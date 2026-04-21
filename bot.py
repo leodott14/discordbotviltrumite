@@ -6,6 +6,7 @@ import math
 import random
 import aiosqlite
 import asyncpg
+import random
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from discord.ext import commands
@@ -107,6 +108,20 @@ async def add_xp(user_id: int, amount: int):
     return new_xp, new_level, new_level > level
 
 # ====================== NUMBER FORMATTER & PARSER ======================
+def draw_card():
+    cards = [2,3,4,5,6,7,8,9,10,10,10,10,11]  # J,Q,K = 10, Ace = 11
+    return random.choice(cards)
+
+def calculate_hand(hand):
+    total = sum(hand)
+    aces = hand.count(11)
+
+    while total > 21 and aces:
+        total -= 10
+        aces -= 1
+
+    return total
+
 def format_game_number(num: float) -> str:
     if num == 0:
         return "0"
@@ -163,6 +178,80 @@ ROLE_PRIORITY = {
     "Elite": 2,
     "Viltrumite": 1
 }
+
+class BlackjackView(discord.ui.View):
+    def __init__(self, ctx, bet, player_hand, dealer_hand):
+        super().__init__(timeout=60)
+        self.ctx = ctx
+        self.bet = bet
+        self.player_hand = player_hand
+        self.dealer_hand = dealer_hand
+        self.game_over = False
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        return interaction.user.id == self.ctx.author.id
+
+    def get_embed(self, reveal_dealer=False):
+        player_total = calculate_hand(self.player_hand)
+
+        dealer_display = self.dealer_hand.copy()
+        if not reveal_dealer:
+            dealer_display = [self.dealer_hand[0], "❓"]
+
+        embed = discord.Embed(title="🃏 Blackjack", color=0x00ff88)
+        embed.add_field(name="Your Hand", value=f"{self.player_hand} (**{player_total}**)", inline=False)
+        embed.add_field(name="Dealer Hand", value=f"{dealer_display}", inline=False)
+        embed.add_field(name="Bet", value=f"{self.bet:,} 🛡️ Sigils", inline=False)
+        return embed
+
+    @discord.ui.button(label="Hit", style=discord.ButtonStyle.green)
+    async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
+
+        self.player_hand.append(draw_card())
+        total = calculate_hand(self.player_hand)
+
+        if total > 21:
+            self.game_over = True
+            await update_sigils(self.ctx.author.id, -self.bet)
+
+            await interaction.response.edit_message(
+                embed=self.get_embed(reveal_dealer=True).add_field(
+                    name="💀 Result",
+                    value="You busted! You lost your bet.",
+                    inline=False
+                ),
+                view=None
+            )
+            self.stop()
+            return
+
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
+    @discord.ui.button(label="Stand", style=discord.ButtonStyle.red)
+    async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+
+        # dealer plays
+        while calculate_hand(self.dealer_hand) < 17:
+            self.dealer_hand.append(draw_card())
+
+        player_total = calculate_hand(self.player_hand)
+        dealer_total = calculate_hand(self.dealer_hand)
+
+        if dealer_total > 21 or player_total > dealer_total:
+            await update_sigils(self.ctx.author.id, self.bet)
+            result = "🎉 You win!"
+        elif player_total < dealer_total:
+            await update_sigils(self.ctx.author.id, -self.bet)
+            result = "💀 You lost!"
+        else:
+            result = "🤝 It's a tie!"
+
+        embed = self.get_embed(reveal_dealer=True)
+        embed.add_field(name="Result", value=result, inline=False)
+
+        await interaction.response.edit_message(embed=embed, view=None)
+        self.stop()
+
 
 # ====================== ERROR HANDLER ======================
 
@@ -559,6 +648,34 @@ async def rank(ctx):
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
 
+@bot.command()
+async def blackjack(ctx, amount: str):
+
+    if not is_commands_channel(ctx):
+        return await ctx.send("❌ Use this in #commands only!")
+
+    try:
+        bet = int(parse_game_number(amount))
+    except:
+        return await ctx.send("❌ Invalid bet amount!")
+
+    if bet <= 0:
+        return await ctx.send("❌ Bet must be greater than 0!")
+
+    balance = await get_sigils(ctx.author.id)
+
+    if bet > balance:
+        return await ctx.send(f"❌ You only have {balance:,} sigils!")
+
+    # initial hands
+    player_hand = [draw_card(), draw_card()]
+    dealer_hand = [draw_card(), draw_card()]
+
+    view = BlackjackView(ctx, bet, player_hand, dealer_hand)
+
+    await ctx.send(embed=view.get_embed(), view=view)
+
+
 @bot.command(name='leaderboard')
 async def leaderboard(ctx):
     if not is_commands_channel(ctx):
@@ -575,7 +692,7 @@ async def leaderboard(ctx):
     if not rows:
         return await ctx.send("No users have XP yet!")
 
-    embed = discord.Embed(title="🏆 Server Leaderboard", color=0xFFD700)
+    embed = discord.Embed(title="🏆 Server Level Leaderboard", color=0xFFD700)
     desc = "\n".join(f"**#{i}** {ctx.guild.get_member(row['user_id']).display_name if ctx.guild.get_member(row['user_id']) else f'User {row['user_id']}'} — Level **{row['level']}** ({row['xp']:,} XP)" for i, row in enumerate(rows, 1))
     embed.description = desc
     await ctx.send(embed=embed)
@@ -596,7 +713,7 @@ async def sigilsleaderboard(ctx):
     if not rows:
         return await ctx.send("No users have sigils yet!")
 
-    embed = discord.Embed(title="🏆 Server Leaderboard", color=0xFFD700)
+    embed = discord.Embed(title="🏆 Server Sigils Leaderboard", color=0xFFD700)
     desc = "\n".join(f"**#{i}** {ctx.guild.get_member(row['user_id']).display_name if ctx.guild.get_member(row['user_id']) else f'User {row['user_id']}'} — Sigils: **{row['sigils']:,}**" for i, row in enumerate(rows, 1))
     embed.description = desc
     await ctx.send(embed=embed)

@@ -6,7 +6,7 @@ import math
 import random
 import aiosqlite
 import asyncpg
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from discord.ext import commands
 
@@ -27,23 +27,32 @@ db_pool = None
 async def init_db():
     global db_pool, db_ready
 
-    print("📦 Connecting to PostgreSQL...")
+    while True:
+        try:
+            print("📦 Connecting to PostgreSQL...")
 
-    db_pool = await asyncpg.create_pool(DATABASE_URL)
+            db_pool = await asyncpg.create_pool(DATABASE_URL)
 
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS levels (
-                user_id BIGINT PRIMARY KEY,
-                xp BIGINT DEFAULT 0,
-                level INT DEFAULT 1,
-                sigils BIGINT DEFAULT 0,
-                last_daily TEXT
-            )
-        """)
+            async with db_pool.acquire() as conn:
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS levels (
+                        user_id BIGINT PRIMARY KEY,
+                        xp BIGINT DEFAULT 0,
+                        level INT DEFAULT 1,
+                        sigils BIGINT DEFAULT 0,
+                        last_daily TEXT
+                    )
+                """)
 
-    db_ready = True
-    print("✅ PostgreSQL ready!")
+            db_ready = True
+            print("✅ PostgreSQL ready!")
+            return
+
+        except Exception as e:
+            print("❌ DB INIT FAILED, retrying in 5s:", e)
+            db_pool = None
+            db_ready = False
+            await asyncio.sleep(5)
 
 
 async def get_user_level(user_id: int):
@@ -75,6 +84,7 @@ async def ensure_db():
 
     if not db_ready:
         raise Exception("DB still initializing")
+
 
 async def add_xp(user_id: int, amount: int):
     xp, level, sigils = await get_user_level(user_id)
@@ -154,7 +164,8 @@ ROLE_PRIORITY = {
     "Viltrumite": 1
 }
 
-# ====================== ERROR HANDLER (so you see what goes wrong) ======================
+# ====================== ERROR HANDLER ======================
+
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
@@ -168,11 +179,16 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    # Wait for database to be ready before processing XP
+    if not db_ready:
+        await bot.process_commands(message)
+        return
+
     if message.channel.name.lower() == "commands":
         await bot.process_commands(message)
         return
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if message.author.id in last_xp_time and now - last_xp_time[message.author.id] < timedelta(seconds=60):
         await bot.process_commands(message)
         return
@@ -193,33 +209,33 @@ async def on_message(message):
     multiplier = ROLE_XP_MULTIPLIERS.get(best_role, 1.0)
     xp_gain = int(xp_gain * multiplier)
 
-    new_xp, new_level, leveled_up = await add_xp(message.author.id, xp_gain)
+    try:
+        new_xp, new_level, leveled_up = await add_xp(message.author.id, xp_gain)
 
-    if leveled_up:
-        level_up_channel = discord.utils.get(message.guild.text_channels, name="level-up")
-        if level_up_channel:
-            embed = discord.Embed(
-                title="🎉 Level Up!",
-                description=f"{message.author.mention} has reached **Level {new_level}**!",
-                color=0x00ff88
-            )
-            embed.add_field(name="Total XP", value=f"{new_xp:,}", inline=True)
-            await level_up_channel.send(embed=embed)
+        if leveled_up:
+            level_up_channel = discord.utils.get(message.guild.text_channels, name="level-up")
+            if level_up_channel:
+                embed = discord.Embed(
+                    title="🎉 Level Up!",
+                    description=f"{message.author.mention} has reached **Level {new_level}**!",
+                    color=0x00ff88
+                )
+                embed.add_field(name="Total XP", value=f"{new_xp:,}", inline=True)
+                await level_up_channel.send(embed=embed)
+    except Exception as e:
+        print(f"Error adding XP: {e}")
 
     await bot.process_commands(message)
 
 @bot.event
 async def on_ready():
     global db_ready
-
-    if db_pool is None:
-        await init_db()
-
-    if db_ready:
-        return
-
-    db_ready = True
+    
     print(f"✅ Bot online as {bot.user}")
+    
+    # Initialize database in background
+    if db_pool is None:
+        bot.loop.create_task(init_db())
 
 # ====================== HELPER ======================
 def is_commands_channel(ctx):
@@ -231,7 +247,7 @@ async def help_command(ctx):
     if not is_commands_channel(ctx):
         await ctx.send("❌ This command can only be used in the **#commands** channel!")
         return
-    # (same help embed as before)
+    
     embed = discord.Embed(title="🤖 Viltrumite Bot", description="Power, Token, Leveling system & Sigils", color=0x00ff88)
     embed.add_field(name="📋 Available Commands", value="`.pcalculate` - Power time calculator\n"
       "`.tcalculate` - Token time calculator\n"
@@ -312,7 +328,15 @@ async def milestones(ctx):
 
 @bot.command()
 async def sigils(ctx):
-    balance = await get_sigils(ctx.author.id) if 'get_sigils' in globals() else 0  # fallback
+    if not is_commands_channel(ctx):
+        await ctx.send("❌ This command can only be used in the **#commands** channel!")
+        return
+    
+    if not db_ready:
+        await ctx.send("⏳ Database is still initializing, please wait a moment...")
+        return
+    
+    balance = await get_sigils(ctx.author.id)
     await ctx.send(embed=discord.Embed(title="🛡️ Iron Sigils", description=f"You own **{balance:,} 🛡️ Sigils**", color=0x00ff88))
 
 async def get_sigils(user_id: int):
@@ -335,6 +359,10 @@ async def update_sigils(user_id: int, amount: int):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def give(ctx, member: discord.Member, amount: int):
+    if not db_ready:
+        await ctx.send("⏳ Database is still initializing, please wait a moment...")
+        return
+    
     if amount <= 0:
         return await ctx.send("❌ Amount must be positive!")
     new_balance = await update_sigils(member.id, amount)
@@ -353,9 +381,13 @@ async def daily(ctx):
         await ctx.send("❌ This command can only be used in the **#commands** channel!")
         return
 
+    if not db_ready:
+        await ctx.send("⏳ Database is still initializing, please wait a moment...")
+        return
+
     await ensure_db()
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     async with db_pool.acquire() as conn:
 
@@ -397,6 +429,10 @@ async def daily(ctx):
 async def gamble(ctx, amount: str):
     if not is_commands_channel(ctx):
         await ctx.send("❌ This command can only be used in the **#commands** channel!")
+        return
+
+    if not db_ready:
+        await ctx.send("⏳ Database is still initializing, please wait a moment...")
         return
 
     try:
@@ -446,6 +482,10 @@ async def checksigils(ctx, member: discord.Member = None):
         await ctx.send("❌ This command can only be used in the **#commands** channel!")
         return
 
+    if not db_ready:
+        await ctx.send("⏳ Database is still initializing, please wait a moment...")
+        return
+
     # If no user mentioned, default to yourself
     target = member or ctx.author
 
@@ -464,6 +504,10 @@ async def checksigils(ctx, member: discord.Member = None):
 @bot.command(name='xpgive')
 @commands.has_permissions(administrator=True)
 async def xpgive(ctx, member: discord.Member, amount: int):
+    if not db_ready:
+        await ctx.send("⏳ Database is still initializing, please wait a moment...")
+        return
+    
     if amount <= 0:
         return await ctx.send("❌ Amount must be greater than 0!")
 
@@ -483,6 +527,7 @@ async def xpgive(ctx, member: discord.Member, amount: int):
         embed.add_field(name="🎉 Level Up!", value=f"{member.mention} reached **Level {new_level}**!", inline=False)
 
     await ctx.send(embed=embed)
+
 @xpgive.error
 async def xpgive_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
@@ -495,6 +540,11 @@ async def rank(ctx):
     if not is_commands_channel(ctx):
         await ctx.send("❌ This command can only be used in the **#commands** channel!")
         return
+    
+    if not db_ready:
+        await ctx.send("⏳ Database is still initializing, please wait a moment...")
+        return
+    
     xp, level, _ = await get_user_level(ctx.author.id)
     current_level_xp = ((level - 1) ** 2) * 100
     next_level_xp = (level ** 2) * 100
@@ -514,22 +564,23 @@ async def leaderboard(ctx):
     if not is_commands_channel(ctx):
         await ctx.send("❌ This command can only be used in the **#commands** channel!")
         return
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT user_id, xp, level FROM levels ORDER BY xp DESC LIMIT 10") as cursor:
-            rows = await cursor.fetchall()
+    
+    if not db_ready:
+        await ctx.send("⏳ Database is still initializing, please wait a moment...")
+        return
+    
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, xp, level FROM levels ORDER BY xp DESC LIMIT 10")
 
     if not rows:
         return await ctx.send("No users have XP yet!")
 
     embed = discord.Embed(title="🏆 Server Leaderboard", color=0xFFD700)
-    desc = "\n".join(f"**#{i}** {ctx.guild.get_member(uid).display_name if ctx.guild.get_member(uid) else f'User {uid}'} — Level **{lvl}** ({xp:,} XP)" for i, (uid, xp, lvl) in enumerate(rows, 1))
+    desc = "\n".join(f"**#{i}** {ctx.guild.get_member(row['user_id']).display_name if ctx.guild.get_member(row['user_id']) else f'User {row['user_id']}'} — Level **{row['level']}** ({row['xp']:,} XP)" for i, row in enumerate(rows, 1))
     embed.description = desc
     await ctx.send(embed=embed)
 
-# ====================== YOUR CALCULATORS (unchanged) ======================
-# (pcalculate and tcalculate are exactly the same as before - I kept them to save space)
-# Paste your original pcalculate and tcalculate here if you want, or keep the ones from my last message.
-
+# ====================== CALCULATORS ======================
 @bot.command(name='pcalculate')
 async def pcalculate(ctx):
     if not is_commands_channel(ctx):
@@ -615,7 +666,7 @@ async def tcalculate(ctx):
     
     try:
         msg = await bot.wait_for('message', check=check, timeout=180)
-        tokens_per_tick = parse_game_number(msg.content)
+        current_tokens = parse_game_number(msg.content)
 
         await ctx.send("**2.** How many **tokens do you earn per tick**?\n"
                        "Example: `150`, `2500`, `27162`")
@@ -635,15 +686,15 @@ async def tcalculate(ctx):
         msg = await bot.wait_for('message', check=check, timeout=180)
         goal = parse_game_number(msg.content)
 
-        if goal <= tokens_per_tick:
-            await ctx.send("🎉 You can already reach your token goal in 1 tick!")
+        if goal <= current_tokens:
+            await ctx.send("🎉 You have already reached or passed your goal!")
             return
 
         if tokens_per_tick <= 0 or tick_rate <= 0:
             await ctx.send("❌ Tokens per tick and tick rate must be greater than 0!")
             return
 
-        needed = goal 
+        needed = goal - current_tokens
         ticks_needed = math.ceil(needed / tokens_per_tick)
         total_seconds = ticks_needed * tick_rate
 
@@ -657,6 +708,7 @@ async def tcalculate(ctx):
             time_str = f"{total_seconds/86400:.2f} days"
 
         embed = discord.Embed(title="⏳ Time to Reach Token Goal", color=0x0099ff)
+        embed.add_field(name="Current Tokens", value=format_game_number(current_tokens), inline=True)
         embed.add_field(name="Tokens per Tick", value=format_game_number(tokens_per_tick), inline=True)
         embed.add_field(name="Tick Rate", value=f"{tick_rate} s", inline=True)
         embed.add_field(name="Token Goal", value=format_game_number(goal), inline=True)
@@ -671,5 +723,6 @@ async def tcalculate(ctx):
         await ctx.send(f"❌ Invalid number format: {e}\nPlease try `.tcalculate` again.")
     except Exception:
         await ctx.send("❌ Something went wrong.")
+        
 # ====================== RUN BOT ======================
 bot.run(TOKEN)

@@ -5,6 +5,7 @@ import os
 import math
 import random
 import aiosqlite
+import asyncpg
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from discord.ext import commands
@@ -17,51 +18,65 @@ if not TOKEN:
     raise Exception("No TOKEN found in environment variables!")
 
 # ====================== DATABASE SETUP ======================
-DB_NAME = "levels.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+db_pool = None
 
 async def init_db():
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""
+    global db_pool
+
+    db_pool = await asyncpg.create_pool(DATABASE_URL)
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS levels (
-                user_id INTEGER PRIMARY KEY,
-                xp INTEGER DEFAULT 0,
-                level INTEGER DEFAULT 1,
-                sigils INTEGER DEFAULT 0,
+                user_id BIGINT PRIMARY KEY,
+                xp BIGINT DEFAULT 0,
+                level INT DEFAULT 1,
+                sigils BIGINT DEFAULT 0,
                 last_daily TEXT
             )
         """)
-        await db.commit()
+
+    print("✅ PostgreSQL ready!")
+
 
 async def get_user_level(user_id: int):
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute(
-            "SELECT xp, level, sigils FROM levels WHERE user_id = ?",
-            (user_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT xp, level, sigils FROM levels WHERE user_id = $1",
+            user_id
+        )
 
         if row is None:
-            async with aiosqlite.connect(DB_NAME) as db2:
-                await db2.execute(
-                    "INSERT INTO levels (user_id, xp, level, sigils, last_daily) VALUES (?, 0, 1, 0, NULL)",
-                    (user_id,)
-                )
-                await db2.commit()
+            await conn.execute(
+                """
+                INSERT INTO levels (user_id, xp, level, sigils, last_daily)
+                VALUES ($1, 0, 1, 0, NULL)
+                """,
+                user_id
+            )
             return 0, 1, 0
 
-        return row
+        return row["xp"], row["level"], row["sigils"]
 
 async def add_xp(user_id: int, amount: int):
-    xp, level, _ = await get_user_level(user_id)
+    xp, level, sigils = await get_user_level(user_id)
+
     new_xp = xp + amount
     new_level = int(math.sqrt(new_xp / 100)) + 1
 
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            "UPDATE levels SET xp = ?, level = ? WHERE user_id = ?",
-            (new_xp, new_level, user_id)
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE levels
+            SET xp = $1, level = $2
+            WHERE user_id = $3
+            """,
+            new_xp,
+            new_level,
+            user_id
         )
-        await db.commit()
 
     return new_xp, new_level, new_level > level
 
@@ -123,10 +138,20 @@ ROLE_PRIORITY = {
     "Viltrumite": 1
 }
 
-@bot.event
-async def on_ready():
-    await init_db()
-    print(f'✅ Bot is online as {bot.user}')
+async def init_db():
+    print("📦 Initializing database...")  # 👈 add this
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS levels (
+                user_id INTEGER PRIMARY KEY,
+                xp INTEGER DEFAULT 0,
+                level INTEGER DEFAULT 1,
+                sigils INTEGER DEFAULT 0,
+                last_daily TEXT
+            )
+        """)
+        await db.commit()
+    print("✅ Database ready!")  # 👈 add this
 
 # ====================== ERROR HANDLER (so you see what goes wrong) ======================
 @bot.event
@@ -181,6 +206,13 @@ async def on_message(message):
             await level_up_channel.send(embed=embed)
 
     await bot.process_commands(message)
+
+@bot.event
+async def on_ready():
+    if db_pool is None:
+        await init_db()
+
+    print(f"✅ Bot online as {bot.user}")
 
 # ====================== HELPER ======================
 def is_commands_channel(ctx):
@@ -281,11 +313,16 @@ async def get_sigils(user_id: int):
     return sigils
 
 async def update_sigils(user_id: int, amount: int):
-    _, _, sigils = await get_user_level(user_id)
+    xp, level, sigils = await get_user_level(user_id)
     new_balance = sigils + amount
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE levels SET sigils = ? WHERE user_id = ?", (new_balance, user_id))
-        await db.commit()
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE levels SET sigils = $1 WHERE user_id = $2",
+            new_balance,
+            user_id
+        )
+
     return new_balance
 
 @bot.command()
@@ -309,27 +346,31 @@ async def daily(ctx):
         await ctx.send("❌ This command can only be used in the **#commands** channel!")
         return
     now = datetime.utcnow()
-    async with aiosqlite.connect(DB_NAME) as db:
-        # Ensure user exists
-        await get_user_level(ctx.author.id)  # creates row if missing
+    async with db_pool.acquire() as conn:
+        await get_user_level(ctx.author.id)
 
-        async with db.execute("SELECT last_daily FROM levels WHERE user_id = ?", (ctx.author.id,)) as cursor:
-            row = await cursor.fetchone()
+    row = await conn.fetchrow(
+        "SELECT last_daily FROM levels WHERE user_id = $1",
+        ctx.author.id
+    )
 
-        if row and row[0]:
-            last = datetime.fromisoformat(row[0])
-            if now - last < timedelta(hours=24):
-                remaining = timedelta(hours=24) - (now - last)
-                hours = remaining.seconds // 3600
-                minutes = (remaining.seconds // 60) % 60
-                return await ctx.send(f"⏳ Daily already claimed. Try again in {hours}h {minutes}m")
+    if row and row["last_daily"]:
+        last = datetime.fromisoformat(row["last_daily"])
+        if now - last < timedelta(hours=24):
+            remaining = timedelta(hours=24) - (now - last)
+            hours = remaining.seconds // 3600
+            minutes = (remaining.seconds // 60) % 60
+            return await ctx.send(f"⏳ Daily already claimed. Try again in {hours}h {minutes}m")
 
-        reward = random.randint(100, 500)
+    reward = random.randint(100, 500)
 
-        await update_sigils(ctx.author.id, reward)
+    await update_sigils(ctx.author.id, reward)
 
-        await db.execute("UPDATE levels SET last_daily = ? WHERE user_id = ?", (now.isoformat(), ctx.author.id))
-        await db.commit()
+    await conn.execute(
+        "UPDATE levels SET last_daily = $1 WHERE user_id = $2",
+        now.isoformat(),
+        ctx.author.id
+    )
 
     await ctx.send(f"🎁 You received **{reward} 🛡️ Iron Sigils**!")
 

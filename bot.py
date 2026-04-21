@@ -448,7 +448,7 @@ async def gamble(ctx, amount: str):
     if bet > balance:
         return await ctx.send(f"❌ You only have **{balance:,} 🛡️ Sigils**!")
 
-    win_chance = 0.45  # 45% chance to win
+    win_chance = 0.42  # 42% chance to win
     multiplier = 2     # double your bet if you win
 
     roll = random.random()

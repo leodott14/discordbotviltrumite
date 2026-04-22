@@ -167,6 +167,8 @@ bot = commands.Bot(command_prefix='.', intents=intents, help_command=None)
 
 last_xp_time = {}   # Anti-spam cooldown
 
+last_sheet_message = None
+
 ROLE_XP_MULTIPLIERS = {
     "Viltrumite": 1.5,
     "Elite": 2.0,
@@ -313,6 +315,31 @@ async def on_message(message):
                 await level_up_channel.send(embed=embed)
     except Exception as e:
         print(f"Error adding XP: {e}")
+
+    await bot.process_commands(message)
+
+@bot.event
+async def on_message(message):
+    global last_sheet_message
+
+    if message.author.bot:
+        return
+
+    # 👇 your existing leveling logic stays here
+
+    # ✅ Sheet-register system
+    if message.channel.name.lower() == "sheet-register":
+        try:
+            # delete old reminder
+            if last_sheet_message:
+                await last_sheet_message.delete()
+        except:
+            pass  # ignore if already deleted
+
+        # send new reminder
+        last_sheet_message = await message.channel.send(
+            "**Please follow the format in the pinned message!**"
+        )
 
     await bot.process_commands(message)
 

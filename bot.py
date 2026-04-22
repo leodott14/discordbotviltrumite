@@ -346,10 +346,12 @@ async def help_command(ctx):
       "`.daily` - Claim your daily Iron Sigils\n"
       "`.sigilsinfo` - How sigils work from donations\n"
       "`.milestones` - All donation milestone rewards\n"
+      "`.checksigils` - Check your sigils balance\n"
       "`.gamble` - Gamble your sigils for a chance to win more!\n"
-      "`.checksigils` - Check your sigils balance",
+      "`.slots` - Play a slots game\n"
+      "`.blackjack` - Play a game of blackjack\n",
       inline=False)
-    embed.set_footer(text="Leveling works by chatting | Level-ups appear in #level-up")
+    embed.set_footer(text="If something is unclear please don't refrain to ask.")
     await ctx.send(embed=embed)
 
 # ====================== SIGILS INFO COMMAND ======================
@@ -372,8 +374,8 @@ async def sigilsinfo(ctx):
     embed.add_field(
         name="🏆 Milestones",
         value="You also get **bonus sigils** when you hit these contribution milestones:\n"
-              "• `100k` • `350k` • `500k` • `700k` • `1M` • `1.5M`\n\n"
-              "Type `.milestones` to see exactly how many sigils each milestone gives!",
+              "• `100k` • `350k` • `500k` • `700k` • `1M` • `1.5M`\n"
+              "Type `.milestones` to see exactly how many sigils each milestone gives!\n\n",
         inline=False
     )
     embed.add_field(
@@ -381,7 +383,7 @@ async def sigilsinfo(ctx):
         value="Once you reach **50,000 (50k) Sigils**, you can redeem **1 week of Titan or Deluxe Gamepass**.",
         inline=False
     )
-    embed.set_footer(text="Use .milestones for full list | Donations are tracked by staff")
+    embed.set_footer(text="To donate tokenns, go to **#redeem-sigils** and check the pinned message for instructions.")
     
     await ctx.send(embed=embed)
 
@@ -410,7 +412,7 @@ async def milestones(ctx):
         value="Milestones are weekly bonuses.",
         inline=False
     )
-    embed.set_footer(text="Send a screenshot of your contributions at every milestone reached.")
+    embed.set_footer(text="Send a screenshot of your clan contributions at every milestone reached.")
     
     await ctx.send(embed=embed)
 

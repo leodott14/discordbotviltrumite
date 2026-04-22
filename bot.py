@@ -327,22 +327,25 @@ async def on_message(message):
 
     # 👇 your existing leveling logic stays here
 
-    # ✅ Sheet-register system
     if message.channel.name.lower() == "sheet-register":
         try:
-            # delete old reminder
             if last_sheet_message:
                 await last_sheet_message.delete()
         except:
-            pass  # ignore if already deleted
+            pass
 
-        # send new reminder
-        last_sheet_message = await message.channel.send(
-            "**Please follow the format in the pinned message!**"
+        embed = discord.Embed(
+            title="📋 Registration Format Required",
+            description="Please follow the format in the **pinned message** before submitting.",
+            color=0x00ff88
         )
 
-    await bot.process_commands(message)
+        embed.set_footer(text="Messages that don't follow the format may be ignored")
 
+        last_sheet_message = await message.channel.send(embed=embed)
+
+    await bot.process_commands(message)
+    
 @bot.event
 async def on_ready():
     global db_ready

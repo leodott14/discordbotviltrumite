@@ -1100,17 +1100,18 @@ async def taxcalculate(ctx):
             return await ctx.send("❌ Tokens per tick and tick rate must be greater than 0!")
 
         tax_reduction = await get_tax_reduction(ctx.author.id)
-        final_tax_rate = max(base_tax_rate - (tax_reduction / 100), 0)
 
         # Estimated full week earnings.
         week_seconds = 7 * 24 * 60 * 60
         week_ticks = week_seconds / tick_rate
         weekly_income = week_ticks * tokens_per_tick
 
-        # Weekly tax is exactly 12 hours of income.
+        # Weekly tax starts as exactly 12 hours of income.
+        # The -1% shop upgrade removes 1% from that 12h tax.
         tax_seconds = 12 * 60 * 60
         tax_ticks = tax_seconds / tick_rate
-        tax_amount = tax_ticks * tokens_per_tick
+        tax_before_reduction = tax_ticks * tokens_per_tick
+        tax_amount = tax_before_reduction * (1 - (tax_reduction / 100))
 
         embed = discord.Embed(title="💰 Weekly Tax Calculation", color=0xffd700)
 
@@ -1118,9 +1119,9 @@ async def taxcalculate(ctx):
         embed.add_field(name="Base Tax Rate", value=f"{base_tax_rate * 100:.0f}%", inline=True)
         embed.add_field(name="Tax Reduction", value=f"-{tax_reduction}%", inline=True)
 
-        embed.add_field(name="Final Tax Rate", value=f"{final_tax_rate * 100:.0f}%", inline=True)
         embed.add_field(name="Tokens per Tick", value=format_game_number(tokens_per_tick), inline=True)
         embed.add_field(name="Tick Rate", value=f"{tick_rate:g}s", inline=True)
+        embed.add_field(name="12h Tax Before Reduction", value=format_game_number(tax_before_reduction), inline=True)
 
         embed.add_field(
             name="Estimated 1 Week Earnings",
@@ -1134,7 +1135,7 @@ async def taxcalculate(ctx):
             inline=False
         )
 
-        embed.set_footer(text="Weekly tax is exactly 12 hours of your income.")
+        embed.set_footer(text="Weekly tax is 12 hours of income. The shop upgrade reduces that by 1%.")
         await ctx.send(embed=embed)
 
     except asyncio.TimeoutError:

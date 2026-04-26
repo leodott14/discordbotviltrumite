@@ -1046,50 +1046,49 @@ async def taxcalculate(ctx):
         return await ctx.send("⏳ Database is still initializing, please wait a moment...")
 
     await ctx.send(
-        "💰 **Tax Calculator started!**
-
-"
-        "**1.** What is your **rank**?
-"
-        "Examples: `Low Tier`, `Viltrumite`, `Elite`, `Veteran Viltrumite`"
+        "💰 **Tax Calculator started!**\n\n"
+        "**1.** What is your **rank**?\n"
+        "Type exactly one of these:\n"
+        "`Low Tier`, `Viltrumite`, `Elite`, `Veteran Viltrumite`"
     )
 
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
 
     try:
-        msg = await bot.wait_for('message', check=check, timeout=180)
+        msg = await bot.wait_for("message", check=check, timeout=180)
         rank_input = msg.content.lower().strip()
 
-        if "veteran" in rank_input:
-            rank_name = "Veteran Viltrumite"
-            base_tax_rate = 0.03
-        elif "elite" in rank_input:
-            rank_name = "Elite"
-            base_tax_rate = 0.05
-        elif "viltrumite" in rank_input:
-            rank_name = "Viltrumite"
-            base_tax_rate = 0.06
-        else:
-            rank_name = "Low Tier"
-            base_tax_rate = 0.07
+        valid_ranks = {
+            "low tier": ("Low Tier", 0.07),
+            "viltrumite": ("Viltrumite", 0.06),
+            "elite": ("Elite", 0.05),
+            "veteran viltrumite": ("Veteran Viltrumite", 0.03)
+        }
+
+        if rank_input not in valid_ranks:
+            return await ctx.send(
+                "❌ Invalid rank. Please type **exactly** one of these:\n"
+                "`Low Tier`, `Viltrumite`, `Elite`, `Veteran Viltrumite`\n\n"
+                "Type `.taxcalculate` again to restart."
+            )
+
+        rank_name, base_tax_rate = valid_ranks[rank_input]
 
         await ctx.send(
-            "**2.** How many **tokens do you earn per tick**?
-"
+            "**2.** How many **tokens do you earn per tick**?\n"
             "Examples: `23126`, `52106`, `95732`, `500K`, `2M`"
         )
 
-        msg = await bot.wait_for('message', check=check, timeout=180)
+        msg = await bot.wait_for("message", check=check, timeout=180)
         tokens_per_tick = parse_game_number(msg.content)
 
         await ctx.send(
-            "**3.** What is your **tick rate**?
-"
+            "**3.** What is your **tick rate**?\n"
             "Examples: `30s`, `35s`, `1m`"
         )
 
-        msg = await bot.wait_for('message', check=check, timeout=180)
+        msg = await bot.wait_for("message", check=check, timeout=180)
         tick_input = msg.content.strip().lower().replace(" ", "")
 
         if tick_input.endswith("m"):
@@ -1103,12 +1102,12 @@ async def taxcalculate(ctx):
         tax_reduction = await get_tax_reduction(ctx.author.id)
         final_tax_rate = max(base_tax_rate - (tax_reduction / 100), 0)
 
-        # Weekly income is displayed for reference.
+        # Full week earnings shown for reference.
         week_seconds = 7 * 24 * 60 * 60
         week_ticks = week_seconds / tick_rate
         weekly_income = week_ticks * tokens_per_tick
 
-        # Weekly tax is based on 12 hours of income.
+        # Actual weekly tax is based on 12 hours of income.
         tax_seconds = 12 * 60 * 60
         tax_ticks = tax_seconds / tick_rate
         tax_base_income = tax_ticks * tokens_per_tick
@@ -1148,11 +1147,9 @@ async def taxcalculate(ctx):
     except asyncio.TimeoutError:
         await ctx.send("⏰ You took too long to reply. Type `.taxcalculate` again.")
     except ValueError as e:
-        await ctx.send(f"❌ Invalid number format: {e}
-Please try `.taxcalculate` again.")
+        await ctx.send(f"❌ Invalid number format: {e}\nPlease try `.taxcalculate` again.")
     except Exception as e:
         await ctx.send(f"❌ Something went wrong: {e}")
-
 
 @bot.command(name='pcalculate')
 async def pcalculate(ctx):

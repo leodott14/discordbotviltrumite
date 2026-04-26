@@ -1040,76 +1040,99 @@ async def shop(ctx):
 @bot.command(name="taxcalculate")
 async def taxcalculate(ctx):
     if not is_commands_channel(ctx):
-        return await ctx.send("❌ Use this in #commands")
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
 
     if not db_ready:
         return await ctx.send("⏳ Database is still initializing, please wait a moment...")
+
+    await ctx.send(
+        "💰 **Tax Calculator started!**
+
+"
+        "**1.** What is your **rank**?
+"
+        "Examples: `Low Tier`, `Viltrumite`, `Elite`, `Veteran Viltrumite`"
+    )
 
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
 
     try:
-        await ctx.send(
-            "**1. What is your rank?**\n"
-            "Type one:\n"
-            "`low`, `elite`, or `veteran`"
-        )
+        msg = await bot.wait_for('message', check=check, timeout=180)
+        rank_input = msg.content.lower().strip()
 
-        msg = await bot.wait_for("message", check=check, timeout=60)
-        rank = msg.content.lower().strip()
-
-        if "veteran" in rank:
+        if "veteran" in rank_input:
+            rank_name = "Veteran Viltrumite"
             base_tax_rate = 0.03
-            rank_name = "Veteran"
-        elif "elite" in rank:
-            base_tax_rate = 0.05
+        elif "elite" in rank_input:
             rank_name = "Elite"
+            base_tax_rate = 0.05
+        elif "viltrumite" in rank_input:
+            rank_name = "Viltrumite"
+            base_tax_rate = 0.06
         else:
+            rank_name = "Low Tier"
             base_tax_rate = 0.07
-            rank_name = "Low"
 
         await ctx.send(
-            "**2. How many tokens do you earn per tick?**\n"
-            "Example: `500K`, `2M`, `150000`"
+            "**2.** How many **tokens do you earn per tick**?
+"
+            "Examples: `23126`, `52106`, `95732`, `500K`, `2M`"
         )
 
-        msg = await bot.wait_for("message", check=check, timeout=60)
+        msg = await bot.wait_for('message', check=check, timeout=180)
         tokens_per_tick = parse_game_number(msg.content)
 
         await ctx.send(
-            "**3. What is your tick rate in seconds?**\n"
-            "Usually around `30s`"
+            "**3.** What is your **tick rate**?
+"
+            "Examples: `30s`, `35s`, `1m`"
         )
 
-        msg = await bot.wait_for("message", check=check, timeout=60)
-        tick_rate = float(msg.content.lower().replace("s", "").strip())
+        msg = await bot.wait_for('message', check=check, timeout=180)
+        tick_input = msg.content.strip().lower().replace(" ", "")
+
+        if tick_input.endswith("m"):
+            tick_rate = float(tick_input.replace("m", "")) * 60
+        else:
+            tick_rate = float(tick_input.replace("s", ""))
 
         if tokens_per_tick <= 0 or tick_rate <= 0:
-            return await ctx.send("❌ Tokens per tick and tick rate must be greater than 0.")
+            return await ctx.send("❌ Tokens per tick and tick rate must be greater than 0!")
 
         tax_reduction = await get_tax_reduction(ctx.author.id)
         final_tax_rate = max(base_tax_rate - (tax_reduction / 100), 0)
 
-        total_seconds = 12 * 60 * 60
-        total_ticks = total_seconds / tick_rate
-        total_income = total_ticks * tokens_per_tick
-        tax_amount = total_income * final_tax_rate
+        # Weekly income is displayed for reference.
+        week_seconds = 7 * 24 * 60 * 60
+        week_ticks = week_seconds / tick_rate
+        weekly_income = week_ticks * tokens_per_tick
 
-        embed = discord.Embed(
-            title="💰 Weekly Tax Calculation",
-            color=0xffd700
-        )
+        # Weekly tax is based on 12 hours of income.
+        tax_seconds = 12 * 60 * 60
+        tax_ticks = tax_seconds / tick_rate
+        tax_base_income = tax_ticks * tokens_per_tick
+        tax_amount = tax_base_income * final_tax_rate
+
+        embed = discord.Embed(title="💰 Weekly Tax Calculation", color=0xffd700)
 
         embed.add_field(name="Rank", value=rank_name, inline=True)
-        embed.add_field(name="Base Tax", value=f"{base_tax_rate * 100:.0f}%", inline=True)
+        embed.add_field(name="Base Tax Rate", value=f"{base_tax_rate * 100:.0f}%", inline=True)
         embed.add_field(name="Tax Reduction", value=f"-{tax_reduction}%", inline=True)
+
         embed.add_field(name="Final Tax Rate", value=f"{final_tax_rate * 100:.0f}%", inline=True)
-        embed.add_field(name="Tokens Per Tick", value=format_game_number(tokens_per_tick), inline=True)
-        embed.add_field(name="Tick Rate", value=f"{tick_rate}s", inline=True)
+        embed.add_field(name="Tokens per Tick", value=format_game_number(tokens_per_tick), inline=True)
+        embed.add_field(name="Tick Rate", value=f"{tick_rate:g}s", inline=True)
 
         embed.add_field(
-            name="Total Earned In 12h",
-            value=format_game_number(total_income),
+            name="Estimated 1 Week Earnings",
+            value=format_game_number(weekly_income),
+            inline=False
+        )
+
+        embed.add_field(
+            name="12h Income Used for Tax",
+            value=format_game_number(tax_base_income),
             inline=False
         )
 
@@ -1119,15 +1142,16 @@ async def taxcalculate(ctx):
             inline=False
         )
 
-        embed.set_footer(text="This uses 12h income as the full weekly tax.")
+        embed.set_footer(text="Weekly tax is calculated from 12 hours of income.")
         await ctx.send(embed=embed)
 
     except asyncio.TimeoutError:
-        await ctx.send("⏰ Took too long. Type `.taxcalculate` again.")
+        await ctx.send("⏰ You took too long to reply. Type `.taxcalculate` again.")
     except ValueError as e:
-        await ctx.send(f"❌ Invalid number format: {e}")
+        await ctx.send(f"❌ Invalid number format: {e}
+Please try `.taxcalculate` again.")
     except Exception as e:
-        await ctx.send(f"❌ Error: {e}")
+        await ctx.send(f"❌ Something went wrong: {e}")
 
 
 @bot.command(name='pcalculate')

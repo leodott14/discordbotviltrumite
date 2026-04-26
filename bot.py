@@ -1121,7 +1121,7 @@ async def taxcalculate(ctx):
 
         embed.add_field(name="Tokens per Tick", value=format_game_number(tokens_per_tick), inline=True)
         embed.add_field(name="Tick Rate", value=f"{tick_rate:g}s", inline=True)
-        embed.add_field(name="12h Tax Before Reduction", value=format_game_number(tax_before_reduction), inline=True)
+        embed.add_field(name="8h Tax Before Reduction", value=format_game_number(tax_before_reduction), inline=True)
 
         embed.add_field(
             name="Estimated 1 Week Earnings",
@@ -1135,7 +1135,7 @@ async def taxcalculate(ctx):
             inline=False
         )
 
-        embed.add_field(name="8h Tax Before Reduction", value=format_game_number(tax_before_reduction), inline=True)
+        embed.set_footer(text="Weekly tax is 8 hours of income. The shop upgrade reduces that by 1%.")
         await ctx.send(embed=embed)
 
     except asyncio.TimeoutError:
@@ -1144,7 +1144,6 @@ async def taxcalculate(ctx):
         await ctx.send(f"❌ Invalid number format: {e}\nPlease try `.taxcalculate` again.")
     except Exception as e:
         await ctx.send(f"❌ Something went wrong: {e}")
-
 @bot.command(name='pcalculate')
 async def pcalculate(ctx):
     if not is_commands_channel(ctx):

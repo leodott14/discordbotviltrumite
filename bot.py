@@ -1106,9 +1106,9 @@ async def taxcalculate(ctx):
         week_ticks = week_seconds / tick_rate
         weekly_income = week_ticks * tokens_per_tick
 
-        # Weekly tax starts as exactly 12 hours of income.
-        # The -1% shop upgrade removes 1% from that 12h tax.
-        tax_seconds = 12 * 60 * 60
+        # Weekly tax starts as exactly 8 hours of income.
+        # The -1% shop upgrade removes 1% from that 8h tax.
+        tax_seconds = 7.5 * 60 * 60
         tax_ticks = tax_seconds / tick_rate
         tax_before_reduction = tax_ticks * tokens_per_tick
         tax_amount = tax_before_reduction * (1 - (tax_reduction / 100))
@@ -1135,7 +1135,7 @@ async def taxcalculate(ctx):
             inline=False
         )
 
-        embed.set_footer(text="Weekly tax is 12 hours of income. The shop upgrade reduces that by 1%.")
+        embed.add_field(name="8h Tax Before Reduction", value=format_game_number(tax_before_reduction), inline=True)
         await ctx.send(embed=embed)
 
     except asyncio.TimeoutError:

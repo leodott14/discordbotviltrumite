@@ -4,9 +4,7 @@ import re
 import os
 import math
 import random
-import aiosqlite
 import asyncpg
-import random
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from discord.ext import commands
@@ -14,16 +12,18 @@ from discord.ext import commands
 # ====================== LOAD TOKEN ======================
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not TOKEN:
     raise Exception("No TOKEN found in environment variables!")
 
+if not DATABASE_URL:
+    raise Exception("No DATABASE_URL found in environment variables!")
+
 # ====================== DATABASE SETUP ======================
 db_ready = False
-
-DATABASE_URL = os.getenv("DATABASE_URL")
-
 db_pool = None
+
 
 async def init_db():
     global db_pool, db_ready
@@ -41,8 +41,15 @@ async def init_db():
                         xp BIGINT DEFAULT 0,
                         level INT DEFAULT 1,
                         sigils BIGINT DEFAULT 0,
-                        last_daily TEXT
+                        last_daily TEXT,
+                        tax_reduction INT DEFAULT 0
                     )
+                """)
+
+                # Keeps older databases from breaking if the table already existed before this update.
+                await conn.execute("""
+                    ALTER TABLE levels
+                    ADD COLUMN IF NOT EXISTS tax_reduction INT DEFAULT 0
                 """)
 
             db_ready = True
@@ -54,6 +61,14 @@ async def init_db():
             db_pool = None
             db_ready = False
             await asyncio.sleep(5)
+
+
+async def ensure_db():
+    if db_pool is None:
+        raise Exception("DB pool not initialized yet")
+
+    if not db_ready:
+        raise Exception("DB still initializing")
 
 
 async def get_user_level(user_id: int):
@@ -68,23 +83,14 @@ async def get_user_level(user_id: int):
         if row is None:
             await conn.execute(
                 """
-                INSERT INTO levels (user_id, xp, level, sigils, last_daily)
-                VALUES ($1, 0, 1, 0, NULL)
+                INSERT INTO levels (user_id, xp, level, sigils, last_daily, tax_reduction)
+                VALUES ($1, 0, 1, 0, NULL, 0)
                 """,
                 user_id
             )
             return 0, 1, 0
 
         return row["xp"], row["level"], row["sigils"]
-    
-async def ensure_db():
-    global db_pool, db_ready
-
-    if db_pool is None:
-        raise Exception("DB pool not initialized yet")
-
-    if not db_ready:
-        raise Exception("DB still initializing")
 
 
 async def add_xp(user_id: int, amount: int):
@@ -107,10 +113,58 @@ async def add_xp(user_id: int, amount: int):
 
     return new_xp, new_level, new_level > level
 
+
+async def get_sigils(user_id: int):
+    _, _, sigils = await get_user_level(user_id)
+    return sigils
+
+
+async def update_sigils(user_id: int, amount: int):
+    xp, level, sigils = await get_user_level(user_id)
+    new_balance = sigils + amount
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE levels SET sigils = $1 WHERE user_id = $2",
+            new_balance,
+            user_id
+        )
+
+    return new_balance
+
+
+async def get_tax_reduction(user_id: int):
+    await get_user_level(user_id)
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT tax_reduction FROM levels WHERE user_id = $1",
+            user_id
+        )
+
+    return row["tax_reduction"] if row else 0
+
+
+async def set_tax_reduction(user_id: int, amount: int = 1):
+    await get_user_level(user_id)
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE levels
+            SET tax_reduction = $1
+            WHERE user_id = $2
+            """,
+            amount,
+            user_id
+        )
+
+
 # ====================== NUMBER FORMATTER & PARSER ======================
 def draw_card():
-    cards = [2,3,4,5,6,7,8,9,10,10,10,10,11]  # J,Q,K = 10, Ace = 11
+    cards = [2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 11]
     return random.choice(cards)
+
 
 def calculate_hand(hand):
     total = sum(hand)
@@ -122,41 +176,67 @@ def calculate_hand(hand):
 
     return total
 
+
 def format_game_number(num: float) -> str:
     if num == 0:
         return "0"
-    suffixes = [('', 1), ('K', 1e3), ('M', 1e6), ('B', 1e9), ('T', 1e12),
-                ('Qa', 1e15), ('Qi', 1e18), ('Sx', 1e21), ('Sp', 1e24),
-                ('Oc', 1e27), ('No', 1e30)]
+
+    suffixes = [
+        ('', 1), ('K', 1e3), ('M', 1e6), ('B', 1e9), ('T', 1e12),
+        ('Qa', 1e15), ('Qi', 1e18), ('Sx', 1e21), ('Sp', 1e24),
+        ('Oc', 1e27), ('No', 1e30)
+    ]
+
     for suffix, value in reversed(suffixes):
         if abs(num) >= value:
             formatted = num / value
             return f"{int(formatted)}{suffix}" if formatted.is_integer() else f"{formatted:.2f}{suffix}"
+
     return f"{num:.2f}"
+
 
 def parse_game_number(s: str) -> float:
     if not s:
         raise ValueError("Empty input")
+
     s = s.strip().upper().replace(" ", "").replace(",", "")
     s = re.sub(r'S$', '', s)
+
     match = re.match(r'^([0-9.]+)([A-Z]*)?$', s)
+
     if not match:
         try:
             return float(s)
         except ValueError:
             raise ValueError(f"Invalid format: {s}")
+
     num_str, suffix = match.groups()
     num = float(num_str)
-    multipliers = {'': 1, 'K': 1e3, 'M': 1e6, 'B': 1e9, 'T': 1e12,
-                   'QA': 1e15, 'QI': 1e18, 'SX': 1e21, 'SP': 1e24,
-                   'OC': 1e27, 'NO': 1e30}
+
+    multipliers = {
+        '': 1,
+        'K': 1e3,
+        'M': 1e6,
+        'B': 1e9,
+        'T': 1e12,
+        'QA': 1e15,
+        'QI': 1e18,
+        'SX': 1e21,
+        'SP': 1e24,
+        'OC': 1e27,
+        'NO': 1e30
+    }
+
     if suffix and suffix not in multipliers:
         raise ValueError(f"Unknown suffix '{suffix}'.")
+
     return num * multipliers.get(suffix, 1)
+
 
 def progress_bar(current, total, length=10):
     filled = int(length * current / total) if total > 0 else 0
     return "█" * filled + "░" * (length - filled)
+
 
 # ====================== BOT SETUP ======================
 intents = discord.Intents.default()
@@ -165,8 +245,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix='.', intents=intents, help_command=None)
 
-last_xp_time = {}   # Anti-spam cooldown
-
+last_xp_time = {}
 last_sheet_message = None
 
 ROLE_XP_MULTIPLIERS = {
@@ -183,42 +262,70 @@ ROLE_PRIORITY = {
 
 SHOP_PING_ID = 526915800154505227
 
+
+# ====================== UI VIEWS ======================
 class ShopView(discord.ui.View):
     def __init__(self, user_id):
         super().__init__(timeout=60)
         self.user_id = user_id
 
     async def interaction_check(self, interaction: discord.Interaction):
-        return interaction.user.id == self.user_id
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This shop is not for you.", ephemeral=True)
+            return False
+        return True
 
-    @discord.ui.button(label="🎟️ 1 Week Gamepass (50k)", style=discord.ButtonStyle.green)
-    async def buy_gamepass(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def notify_owner(self, interaction: discord.Interaction, item_name: str):
+        await interaction.channel.send(
+            f"<@{SHOP_PING_ID}> 🛒 {interaction.user.mention} bought **{item_name}**!"
+        )
+
+    @discord.ui.button(label="🎟️ 1 Week Titan — 50k", style=discord.ButtonStyle.green)
+    async def buy_titan(self, interaction: discord.Interaction, button: discord.ui.Button):
         balance = await get_sigils(self.user_id)
 
         if balance < 50000:
             return await interaction.response.send_message("❌ Not enough sigils!", ephemeral=True)
 
         await update_sigils(self.user_id, -50000)
+        await interaction.response.send_message("✅ Purchased **1 Week Titan Gamepass**!", ephemeral=True)
+        await self.notify_owner(interaction, "1 Week Titan Gamepass")
 
-        await interaction.response.send_message("✅ Purchased 1 Week Gamepass!", ephemeral=True)
+    @discord.ui.button(label="💎 1 Week Deluxe — 50k", style=discord.ButtonStyle.green)
+    async def buy_deluxe(self, interaction: discord.Interaction, button: discord.ui.Button):
+        balance = await get_sigils(self.user_id)
 
-        channel = interaction.channel
-        await channel.send(f"<@{SHOP_PING_ID}> 🛒 {interaction.user.mention} bought **1 Week Gamepass**!")
+        if balance < 50000:
+            return await interaction.response.send_message("❌ Not enough sigils!", ephemeral=True)
 
-    @discord.ui.button(label="📉 -1% Tax (20k)", style=discord.ButtonStyle.blurple)
+        await update_sigils(self.user_id, -50000)
+        await interaction.response.send_message("✅ Purchased **1 Week Deluxe Gamepass**!", ephemeral=True)
+        await self.notify_owner(interaction, "1 Week Deluxe Gamepass")
+
+    @discord.ui.button(label="📉 -1% Tax — 20k", style=discord.ButtonStyle.blurple)
     async def buy_tax(self, interaction: discord.Interaction, button: discord.ui.Button):
+        already_bought = await get_tax_reduction(self.user_id)
+
+        if already_bought >= 1:
+            return await interaction.response.send_message(
+                "❌ You already purchased the **-1% Tax Reduction**. This is a one-time purchase only.",
+                ephemeral=True
+            )
+
         balance = await get_sigils(self.user_id)
 
         if balance < 20000:
             return await interaction.response.send_message("❌ Not enough sigils!", ephemeral=True)
 
         await update_sigils(self.user_id, -20000)
+        await set_tax_reduction(self.user_id, 1)
 
-        # you can later store this in DB if you want stacking
-        await interaction.response.send_message("✅ Purchased -1% Tax Reduction!", ephemeral=True)
+        await interaction.response.send_message(
+            "✅ Purchased **-1% Tax Reduction**! This one-time upgrade is now active.",
+            ephemeral=True
+        )
 
-        channel = interaction.channel
-        await channel.send(f"<@{SHOP_PING_ID}> 📉 {interaction.user.mention} bought **-1% Tax Reduction**!")
+        await self.notify_owner(interaction, "-1% Tax Reduction")
 
 
 class BlackjackView(discord.ui.View):
@@ -248,7 +355,6 @@ class BlackjackView(discord.ui.View):
 
     @discord.ui.button(label="Hit", style=discord.ButtonStyle.green)
     async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
-
         self.player_hand.append(draw_card())
         total = calculate_hand(self.player_hand)
 
@@ -256,14 +362,10 @@ class BlackjackView(discord.ui.View):
             self.game_over = True
             await update_sigils(self.ctx.author.id, -self.bet)
 
-            await interaction.response.edit_message(
-                embed=self.get_embed(reveal_dealer=True).add_field(
-                    name="💀 Result",
-                    value="You busted! You lost your bet.",
-                    inline=False
-                ),
-                view=None
-            )
+            embed = self.get_embed(reveal_dealer=True)
+            embed.add_field(name="💀 Result", value="You busted! You lost your bet.", inline=False)
+
+            await interaction.response.edit_message(embed=embed, view=None)
             self.stop()
             return
 
@@ -271,8 +373,6 @@ class BlackjackView(discord.ui.View):
 
     @discord.ui.button(label="Stand", style=discord.ButtonStyle.red)
     async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
-
-        # dealer plays
         while calculate_hand(self.dealer_hand) < 17:
             self.dealer_hand.append(draw_card())
 
@@ -296,30 +396,68 @@ class BlackjackView(discord.ui.View):
 
 
 # ====================== ERROR HANDLER ======================
-
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
+
+    if isinstance(error, commands.MissingRequiredArgument):
+        return await ctx.send(f"❌ Missing argument. Use `.help` to see commands.")
+
+    if isinstance(error, commands.BadArgument):
+        return await ctx.send("❌ Invalid argument. Check your command and try again.")
+
+    if isinstance(error, commands.MissingPermissions):
+        return await ctx.send("❌ You do not have permission to use this command.")
+
     await ctx.send(f"❌ Something went wrong: {error}")
     print(f"Error in command {ctx.command}: {error}")
 
-# ====================== LEVELING SYSTEM ======================
+
+# ====================== EVENTS ======================
+@bot.event
+async def on_ready():
+    print(f"✅ Bot online as {bot.user}")
+
+    if db_pool is None:
+        bot.loop.create_task(init_db())
+
+
 @bot.event
 async def on_message(message):
+    global last_sheet_message
+
     if message.author.bot:
         return
 
-    # Wait for database to be ready before processing XP
+    # Sheet-register reminder.
+    if message.channel.name.lower() == "sheet-register":
+        try:
+            if last_sheet_message:
+                await last_sheet_message.delete()
+        except Exception:
+            pass
+
+        embed = discord.Embed(
+            title="📋 Registration Format Required",
+            description="Please follow the format in the **pinned message** before submitting.",
+            color=0x00ff88
+        )
+        embed.set_footer(text="Messages that don't follow the format may be ignored")
+        last_sheet_message = await message.channel.send(embed=embed)
+
+    # Wait for database before giving XP.
     if not db_ready:
         await bot.process_commands(message)
         return
 
+    # No XP in commands channel.
     if message.channel.name.lower() == "commands":
         await bot.process_commands(message)
         return
 
     now = datetime.now(timezone.utc)
+
     if message.author.id in last_xp_time and now - last_xp_time[message.author.id] < timedelta(seconds=60):
         await bot.process_commands(message)
         return
@@ -328,14 +466,14 @@ async def on_message(message):
 
     xp_gain = random.randint(10, 25)
     member = message.author
+
     best_role = None
     best_priority = 0
 
     for role in member.roles:
-        if role.name in ROLE_PRIORITY:
-            if ROLE_PRIORITY[role.name] > best_priority:
-                best_priority = ROLE_PRIORITY[role.name]
-                best_role = role.name
+        if role.name in ROLE_PRIORITY and ROLE_PRIORITY[role.name] > best_priority:
+            best_priority = ROLE_PRIORITY[role.name]
+            best_role = role.name
 
     multiplier = ROLE_XP_MULTIPLIERS.get(best_role, 1.0)
     xp_gain = int(xp_gain * multiplier)
@@ -353,209 +491,196 @@ async def on_message(message):
                 )
                 embed.add_field(name="Total XP", value=f"{new_xp:,}", inline=True)
                 await level_up_channel.send(embed=embed)
+
     except Exception as e:
         print(f"Error adding XP: {e}")
 
     await bot.process_commands(message)
 
-@bot.event
-async def on_message(message):
-    global last_sheet_message
 
-    if message.author.bot:
-        return
-
-    # 👇 your existing leveling logic stays here
-
-    if message.channel.name.lower() == "sheet-register":
-        try:
-            if last_sheet_message:
-                await last_sheet_message.delete()
-        except:
-            pass
-
-        embed = discord.Embed(
-            title="📋 Registration Format Required",
-            description="Please follow the format in the **pinned message** before submitting.",
-            color=0x00ff88
-        )
-
-        embed.set_footer(text="Messages that don't follow the format may be ignored")
-
-        last_sheet_message = await message.channel.send(embed=embed)
-
-    await bot.process_commands(message)
-    
-@bot.event
-async def on_ready():
-    global db_ready
-    
-    print(f"✅ Bot online as {bot.user}")
-    
-    # Initialize database in background
-    if db_pool is None:
-        bot.loop.create_task(init_db())
-
-# ====================== HELPER ======================
+# ====================== HELPERS ======================
 def is_commands_channel(ctx):
     return ctx.channel.name.lower() == "commands"
 
-# ====================== COMMANDS ======================
-embed = discord.Embed(
-    title="🤖 Viltrumite Bot",
-    description="Systems & Commands",
-    color=0x00ff88
-)
 
-embed.add_field(
-    name="📊 Rank Commands",
-    value="`.rank`\n`.leaderboard`",
-    inline=False
-)
+# ====================== HELP COMMAND ======================
+@bot.command(name="help")
+async def help_command(ctx):
+    if not is_commands_channel(ctx):
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
 
-embed.add_field(
-    name="🛡️ Sigils Commands",
-    value="`.sigils`\n`.daily`\n`.gamble`\n`.checksigils`\n`.shop`\n`.sigilsleaderboard`",
-    inline=False
-)
+    embed = discord.Embed(
+        title="🤖 Viltrumite Bot Help",
+        description="Here are all available commands:",
+        color=0x00ff88
+    )
 
-embed.add_field(
-    name="🧮 Calculators",
-    value="`.pcalculate`\n`.tcalculate`\n`.taxcalculate`",
-    inline=False
-)
-# ====================== SIGILS INFO COMMAND ======================
+    embed.add_field(
+        name="📊 Rank Commands",
+        value=(
+            "`.rank` — Check your level and XP\n"
+            "`.leaderboard` — View XP leaderboard"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🛡️ Sigils Commands",
+        value=(
+            "`.sigils` — Check your sigils\n"
+            "`.daily` — Claim daily sigils\n"
+            "`.gamble <amount>` — Gamble sigils\n"
+            "`.slots <amount>` — Play slots\n"
+            "`.blackjack <amount>` — Play blackjack\n"
+            "`.checksigils @user` — Check someone’s sigils\n"
+            "`.sigilsleaderboard` — View sigils leaderboard\n"
+            "`.sigilsinfo` — Info about earning sigils\n"
+            "`.milestones` — View milestone rewards\n"
+            "`.shop` — Redeem sigils"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🧮 Calculators",
+        value=(
+            "`.pcalculate` — Power calculator\n"
+            "`.tcalculate` — Token calculator\n"
+            "`.taxcalculate` — Weekly tax calculator"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🛠️ Admin Commands",
+        value=(
+            "`.give @user <amount>` — Give sigils\n"
+            "`.xpgive @user <amount>` — Give XP"
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text="Use these commands in #commands")
+    await ctx.send(embed=embed)
+
+
+# ====================== SIGILS INFO COMMANDS ======================
 @bot.command(name='sigilsinfo')
 async def sigilsinfo(ctx):
     if not is_commands_channel(ctx):
-        await ctx.send("❌ This command can only be used in the **#commands** channel!")
-        return
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
 
     embed = discord.Embed(
         title="🛡️ Sigils Information",
         description="**How to earn Sigils from Token Donations**",
         color=0x00ff88
     )
+
     embed.add_field(
         name="💰 Main Rule",
         value="For every **1,000,000 (1M)** donated tokens you receive **100 Sigils**.",
         inline=False
     )
+
     embed.add_field(
         name="🏆 Milestones",
-        value="You also get **bonus sigils** when you hit these contribution milestones:\n"
-              "• `100k` • `350k` • `500k` • `700k` • `1M` • `1.5M`\n"
-              "Type `.milestones` to see exactly how many sigils each milestone gives!\n\n",
+        value=(
+            "You also get **bonus sigils** when you hit these contribution milestones:\n"
+            "• `100k` • `350k` • `500k` • `700k` • `1M` • `1.5M`\n"
+            "Type `.milestones` to see exactly how many sigils each milestone gives!"
+        ),
         inline=False
     )
+
     embed.add_field(
         name="🔄 Redemption",
         value="Once you reach **50,000 (50k) Sigils**, you can redeem **1 week of Titan or Deluxe Gamepass**.",
         inline=False
     )
-    embed.set_footer(text="To donate tokenns, go to **#redeem-sigils** and check the pinned message for instructions.")
-    
+
+    embed.set_footer(text="To donate tokens, go to #redeem-sigils and check the pinned message for instructions.")
     await ctx.send(embed=embed)
 
 
-# ====================== MILESTONES COMMAND ======================
 @bot.command(name='milestones')
 async def milestones(ctx):
     if not is_commands_channel(ctx):
-        await ctx.send("❌ This command can only be used in the **#commands** channel!")
-        return
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
 
     embed = discord.Embed(
         title="🏆 Token Contribution Milestones",
         description="Every time you hit one of these totals in contribution towards the clan.",
         color=0x00ff88
     )
-    embed.add_field(name="100K",  value="**+40 Sigils**",  inline=True)
+
+    embed.add_field(name="100K", value="**+40 Sigils**", inline=True)
     embed.add_field(name="350K", value="**+125 Sigils**", inline=True)
     embed.add_field(name="500K", value="**+175 Sigils**", inline=True)
     embed.add_field(name="700K", value="**+250 Sigils**", inline=True)
-    embed.add_field(name="1M",   value="**+300 Sigils**", inline=True)
+    embed.add_field(name="1M", value="**+300 Sigils**", inline=True)
     embed.add_field(name="1.5M", value="**+400 Sigils**", inline=True)
-    
-    embed.add_field(
-        name="💡 Note",
-        value="Milestones are weekly bonuses.",
-        inline=False
-    )
+
+    embed.add_field(name="💡 Note", value="Milestones are weekly bonuses.", inline=False)
     embed.set_footer(text="Send a screenshot of your clan contributions at every milestone reached.")
-    
+
     await ctx.send(embed=embed)
 
 
 @bot.command()
 async def sigils(ctx):
     if not is_commands_channel(ctx):
-        await ctx.send("❌ This command can only be used in the **#commands** channel!")
-        return
-    
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
+
     if not db_ready:
-        await ctx.send("⏳ Database is still initializing, please wait a moment...")
-        return
-    
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
+
     balance = await get_sigils(ctx.author.id)
-    await ctx.send(embed=discord.Embed(title="🛡️ Iron Sigils", description=f"You own **{balance:,} 🛡️ Sigils**", color=0x00ff88))
 
-async def get_sigils(user_id: int):
-    _, _, sigils = await get_user_level(user_id)
-    return sigils
+    embed = discord.Embed(
+        title="🛡️ Iron Sigils",
+        description=f"You own **{balance:,} 🛡️ Sigils**",
+        color=0x00ff88
+    )
 
-async def update_sigils(user_id: int, amount: int):
-    xp, level, sigils = await get_user_level(user_id)
-    new_balance = sigils + amount
+    await ctx.send(embed=embed)
 
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE levels SET sigils = $1 WHERE user_id = $2",
-            new_balance,
-            user_id
-        )
-
-    return new_balance
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def give(ctx, member: discord.Member, amount: int):
     if not db_ready:
-        await ctx.send("⏳ Database is still initializing, please wait a moment...")
-        return
-    
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
+
     if amount <= 0:
         return await ctx.send("❌ Amount must be positive!")
+
     new_balance = await update_sigils(member.id, amount)
-    embed = discord.Embed(title="🛡️ Sigils Given", description=f"{ctx.author.mention} gave {member.mention} **{amount:,} 🛡️ Sigils**", color=0xffd700)
+
+    embed = discord.Embed(
+        title="🛡️ Sigils Given",
+        description=f"{ctx.author.mention} gave {member.mention} **{amount:,} 🛡️ Sigils**",
+        color=0xffd700
+    )
     embed.add_field(name="New Balance", value=f"{new_balance:,} 🛡️ Sigils")
+
     await ctx.send(embed=embed)
 
-@give.error
-async def give_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ You need Administrator permission.")
 
 @bot.command()
 async def daily(ctx):
     if not is_commands_channel(ctx):
-        await ctx.send("❌ This command can only be used in the **#commands** channel!")
-        return
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
 
     if not db_ready:
-        await ctx.send("⏳ Database is still initializing, please wait a moment...")
-        return
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
 
     await ensure_db()
-
     now = datetime.now(timezone.utc)
 
     async with db_pool.acquire() as conn:
-
-        # make sure user exists
         await conn.execute("""
-            INSERT INTO levels (user_id, xp, level, sigils, last_daily)
-            VALUES ($1, 0, 1, 0, NULL)
+            INSERT INTO levels (user_id, xp, level, sigils, last_daily, tax_reduction)
+            VALUES ($1, 0, 1, 0, NULL, 0)
             ON CONFLICT (user_id) DO NOTHING
         """, ctx.author.id)
 
@@ -571,9 +696,7 @@ async def daily(ctx):
                 remaining = timedelta(hours=24) - (now - last)
                 hours = remaining.seconds // 3600
                 minutes = (remaining.seconds // 60) % 60
-                return await ctx.send(
-                    f"⏳ Daily already claimed. Try again in {hours}h {minutes}m"
-                )
+                return await ctx.send(f"⏳ Daily already claimed. Try again in {hours}h {minutes}m")
 
         reward = random.randint(100, 500)
 
@@ -586,19 +709,18 @@ async def daily(ctx):
 
     await ctx.send(f"🎁 You received **{reward} 🛡️ Iron Sigils**!")
 
+
 @bot.command(name='gamble')
 async def gamble(ctx, amount: str):
     if not is_commands_channel(ctx):
-        await ctx.send("❌ This command can only be used in the **#commands** channel!")
-        return
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
 
     if not db_ready:
-        await ctx.send("⏳ Database is still initializing, please wait a moment...")
-        return
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
 
     try:
         bet = int(parse_game_number(amount))
-    except:
+    except Exception:
         return await ctx.send("❌ Invalid bet amount!")
 
     if bet <= 0:
@@ -609,9 +731,8 @@ async def gamble(ctx, amount: str):
     if bet > balance:
         return await ctx.send(f"❌ You only have **{balance:,} 🛡️ Sigils**!")
 
-    win_chance = 0.42  # 42% chance to win
-    multiplier = 2     # double your bet if you win
-
+    win_chance = 0.42
+    multiplier = 2
     roll = random.random()
 
     if roll < win_chance:
@@ -637,19 +758,16 @@ async def gamble(ctx, amount: str):
 
     await ctx.send(embed=embed)
 
+
 @bot.command(name='checksigils')
 async def checksigils(ctx, member: discord.Member = None):
     if not is_commands_channel(ctx):
-        await ctx.send("❌ This command can only be used in the **#commands** channel!")
-        return
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
 
     if not db_ready:
-        await ctx.send("⏳ Database is still initializing, please wait a moment...")
-        return
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
 
-    # If no user mentioned, default to yourself
     target = member or ctx.author
-
     balance = await get_sigils(target.id)
 
     embed = discord.Embed(
@@ -657,22 +775,20 @@ async def checksigils(ctx, member: discord.Member = None):
         description=f"{target.mention} owns **{balance:,} 🛡️ Sigils**",
         color=0x00ff88
     )
-
     embed.set_thumbnail(url=target.display_avatar.url)
 
     await ctx.send(embed=embed)
+
 
 @bot.command(name='xpgive')
 @commands.has_permissions(administrator=True)
 async def xpgive(ctx, member: discord.Member, amount: int):
     if not db_ready:
-        await ctx.send("⏳ Database is still initializing, please wait a moment...")
-        return
-    
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
+
     if amount <= 0:
         return await ctx.send("❌ Amount must be greater than 0!")
 
-    # Add XP using your existing system
     new_xp, new_level, leveled_up = await add_xp(member.id, amount)
 
     embed = discord.Embed(
@@ -685,49 +801,110 @@ async def xpgive(ctx, member: discord.Member, amount: int):
     embed.add_field(name="Level", value=f"{new_level}", inline=True)
 
     if leveled_up:
-        embed.add_field(name="🎉 Level Up!", value=f"{member.mention} reached **Level {new_level}**!", inline=False)
+        embed.add_field(
+            name="🎉 Level Up!",
+            value=f"{member.mention} reached **Level {new_level}**!",
+            inline=False
+        )
 
     await ctx.send(embed=embed)
 
-@xpgive.error
-async def xpgive_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ You need Administrator permission.")
-    elif isinstance(error, commands.BadArgument):
-        await ctx.send("❌ Usage: `.xpgive @user <amount>`")
 
+# ====================== RANKING COMMANDS ======================
 @bot.command(name='rank')
 async def rank(ctx):
     if not is_commands_channel(ctx):
-        await ctx.send("❌ This command can only be used in the **#commands** channel!")
-        return
-    
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
+
     if not db_ready:
-        await ctx.send("⏳ Database is still initializing, please wait a moment...")
-        return
-    
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
+
     xp, level, _ = await get_user_level(ctx.author.id)
+
     current_level_xp = ((level - 1) ** 2) * 100
     next_level_xp = (level ** 2) * 100
+
     progress = ((xp - current_level_xp) / (next_level_xp - current_level_xp) * 100) if next_level_xp > current_level_xp else 100
 
     embed = discord.Embed(title=f"{ctx.author.display_name}'s Rank", color=0x00ff88)
     embed.add_field(name="Level", value=f"**{level}**", inline=True)
     embed.add_field(name="Total XP", value=f"{xp:,}", inline=True)
     embed.add_field(name="Progress", value=f"{progress:.1f}%", inline=True)
-    embed.add_field(name="Progress Bar", value=progress_bar(xp - current_level_xp, next_level_xp - current_level_xp), inline=False)
+    embed.add_field(
+        name="Progress Bar",
+        value=progress_bar(xp - current_level_xp, next_level_xp - current_level_xp),
+        inline=False
+    )
     embed.add_field(name="XP to next level", value=f"{next_level_xp - xp:,}", inline=False)
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
+
     await ctx.send(embed=embed)
 
+
+@bot.command(name='leaderboard')
+async def leaderboard(ctx):
+    if not is_commands_channel(ctx):
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
+
+    if not db_ready:
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
+
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, xp, level FROM levels ORDER BY xp DESC LIMIT 10")
+
+    if not rows:
+        return await ctx.send("No users have XP yet!")
+
+    embed = discord.Embed(title="🏆 Server Level Leaderboard", color=0xFFD700)
+
+    lines = []
+    for i, row in enumerate(rows, 1):
+        member = ctx.guild.get_member(row["user_id"])
+        name = member.display_name if member else f"User {row['user_id']}"
+        lines.append(f"**#{i}** {name} — Level **{row['level']}** ({row['xp']:,} XP)")
+
+    embed.description = "\n".join(lines)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name='sigilsleaderboard')
+async def sigilsleaderboard(ctx):
+    if not is_commands_channel(ctx):
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
+
+    if not db_ready:
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
+
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, sigils FROM levels ORDER BY sigils DESC LIMIT 10")
+
+    if not rows:
+        return await ctx.send("No users have sigils yet!")
+
+    embed = discord.Embed(title="🏆 Server Sigils Leaderboard", color=0xFFD700)
+
+    lines = []
+    for i, row in enumerate(rows, 1):
+        member = ctx.guild.get_member(row["user_id"])
+        name = member.display_name if member else f"User {row['user_id']}"
+        lines.append(f"**#{i}** {name} — Sigils: **{row['sigils']:,}**")
+
+    embed.description = "\n".join(lines)
+    await ctx.send(embed=embed)
+
+
+# ====================== GAME COMMANDS ======================
 @bot.command(name='slots')
 async def slots(ctx, amount: str):
     if not is_commands_channel(ctx):
         return await ctx.send("❌ Use this in #commands!")
 
+    if not db_ready:
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
+
     try:
         bet = int(parse_game_number(amount))
-    except:
+    except Exception:
         return await ctx.send("❌ Invalid bet amount!")
 
     if bet <= 0:
@@ -739,8 +916,7 @@ async def slots(ctx, amount: str):
         return await ctx.send(f"❌ You only have {balance:,} 🛡️ Sigils!")
 
     emojis = ["🍒", "🍋", "🍇", "💎", "⭐", "7️⃣"]
-
-    weights = [35, 30, 22, 8, 4, 1]  # even harsher rarity
+    weights = [35, 30, 22, 8, 4, 1]
 
     reel1 = random.choices(emojis, weights=weights, k=1)[0]
     reel2 = random.choices(emojis, weights=weights, k=1)[0]
@@ -748,7 +924,6 @@ async def slots(ctx, amount: str):
 
     result = f"{reel1} | {reel2} | {reel3}"
 
-    # 💎 TRIPLE MATCH (very rare, reduced payout)
     if reel1 == reel2 == reel3:
         if reel1 == "💎":
             multiplier = 6
@@ -768,16 +943,13 @@ async def slots(ctx, amount: str):
             color=0x00ff88
         )
 
-    # 🔁 PAIR = NO PROFIT (IMPORTANT FIX)
     elif reel1 == reel2 or reel2 == reel3 or reel1 == reel3:
-        # no change to balance
         embed = discord.Embed(
             title="😐 Neutral Spin",
             description=f"**{result}**\nNo win, no loss.",
             color=0xffd700
         )
 
-    # 💀 LOSS (most outcomes)
     else:
         await update_sigils(ctx.author.id, -bet)
 
@@ -792,15 +964,18 @@ async def slots(ctx, amount: str):
 
     await ctx.send(embed=embed)
 
+
 @bot.command()
 async def blackjack(ctx, amount: str):
-
     if not is_commands_channel(ctx):
         return await ctx.send("❌ Use this in #commands only!")
 
+    if not db_ready:
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
+
     try:
         bet = int(parse_game_number(amount))
-    except:
+    except Exception:
         return await ctx.send("❌ Invalid bet amount!")
 
     if bet <= 0:
@@ -811,34 +986,48 @@ async def blackjack(ctx, amount: str):
     if bet > balance:
         return await ctx.send(f"❌ You only have {balance:,} sigils!")
 
-    # initial hands
     player_hand = [draw_card(), draw_card()]
     dealer_hand = [draw_card(), draw_card()]
 
     view = BlackjackView(ctx, bet, player_hand, dealer_hand)
-
     await ctx.send(embed=view.get_embed(), view=view)
 
+
+# ====================== SHOP COMMAND ======================
 @bot.command(name="shop")
 async def shop(ctx):
     if not is_commands_channel(ctx):
         return await ctx.send("❌ Use this in #commands")
 
+    if not db_ready:
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
+
+    balance = await get_sigils(ctx.author.id)
+    tax_reduction = await get_tax_reduction(ctx.author.id)
+
+    tax_status = "✅ Purchased" if tax_reduction >= 1 else "❌ Not purchased"
+
     embed = discord.Embed(
         title="🛒 Sigil Shop",
-        description="Spend your sigils on rewards",
+        description=f"You have **{balance:,} 🛡️ Sigils**",
         color=0x00ff88
     )
 
     embed.add_field(
-        name="🎟️ Gamepass",
-        value="**50,000 Sigils** → 1 Week Titan/Deluxe",
+        name="🎟️ 1 Week Titan Gamepass",
+        value="Cost: **50,000 Sigils**",
         inline=False
     )
 
     embed.add_field(
-        name="📉 Tax Reduction",
-        value="**20,000 Sigils** → -1% Tax",
+        name="💎 1 Week Deluxe Gamepass",
+        value="Cost: **50,000 Sigils**",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📉 One-Time Tax Reduction",
+        value=f"Cost: **20,000 Sigils** → **-1% Tax**\nStatus: **{tax_status}**",
         inline=False
     )
 
@@ -846,122 +1035,111 @@ async def shop(ctx):
 
     await ctx.send(embed=embed, view=ShopView(ctx.author.id))
 
+
+# ====================== CALCULATORS ======================
 @bot.command(name="taxcalculate")
 async def taxcalculate(ctx):
     if not is_commands_channel(ctx):
         return await ctx.send("❌ Use this in #commands")
 
+    if not db_ready:
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
+
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
 
     try:
-        await ctx.send("**1. What is your rank?**\n(low / elite / veteran)")
+        await ctx.send(
+            "**1. What is your rank?**\n"
+            "Type one:\n"
+            "`low`, `elite`, or `veteran`"
+        )
 
         msg = await bot.wait_for("message", check=check, timeout=60)
-        rank = msg.content.lower()
+        rank = msg.content.lower().strip()
 
-        if "elite" in rank:
-            tax_rate = 0.05
-        elif "veteran" in rank:
-            tax_rate = 0.03
+        if "veteran" in rank:
+            base_tax_rate = 0.03
+            rank_name = "Veteran"
+        elif "elite" in rank:
+            base_tax_rate = 0.05
+            rank_name = "Elite"
         else:
-            tax_rate = 0.07  # low tier
+            base_tax_rate = 0.07
+            rank_name = "Low"
 
-        await ctx.send("**2. Tokens per tick?** (e.g. 500K, 2M)")
+        await ctx.send(
+            "**2. How many tokens do you earn per tick?**\n"
+            "Example: `500K`, `2M`, `150000`"
+        )
 
         msg = await bot.wait_for("message", check=check, timeout=60)
         tokens_per_tick = parse_game_number(msg.content)
 
-        await ctx.send("**3. Tick rate (seconds)?** (usually ~30)")
+        await ctx.send(
+            "**3. What is your tick rate in seconds?**\n"
+            "Usually around `30s`"
+        )
 
         msg = await bot.wait_for("message", check=check, timeout=60)
-        tick_rate = float(msg.content.replace("s", "").strip())
+        tick_rate = float(msg.content.lower().replace("s", "").strip())
 
-        # 16 hours = 57600 seconds
-        total_ticks = 57600 / tick_rate
+        if tokens_per_tick <= 0 or tick_rate <= 0:
+            return await ctx.send("❌ Tokens per tick and tick rate must be greater than 0.")
+
+        tax_reduction = await get_tax_reduction(ctx.author.id)
+        final_tax_rate = max(base_tax_rate - (tax_reduction / 100), 0)
+
+        total_seconds = 12 * 60 * 60
+        total_ticks = total_seconds / tick_rate
         total_income = total_ticks * tokens_per_tick
-
-        tax_amount = total_income * tax_rate
+        tax_amount = total_income * final_tax_rate
 
         embed = discord.Embed(
-            title="💰 Tax Calculation",
+            title="💰 Weekly Tax Calculation",
             color=0xffd700
         )
 
-        embed.add_field(name="Rank", value=rank.title(), inline=True)
-        embed.add_field(name="Tax Rate", value=f"{int(tax_rate*100)}%", inline=True)
+        embed.add_field(name="Rank", value=rank_name, inline=True)
+        embed.add_field(name="Base Tax", value=f"{base_tax_rate * 100:.0f}%", inline=True)
+        embed.add_field(name="Tax Reduction", value=f"-{tax_reduction}%", inline=True)
+        embed.add_field(name="Final Tax Rate", value=f"{final_tax_rate * 100:.0f}%", inline=True)
+        embed.add_field(name="Tokens Per Tick", value=format_game_number(tokens_per_tick), inline=True)
+        embed.add_field(name="Tick Rate", value=f"{tick_rate}s", inline=True)
 
         embed.add_field(
-            name="Total Earned (16h)",
+            name="Total Earned In 12h",
             value=format_game_number(total_income),
             inline=False
         )
 
         embed.add_field(
-            name="Tax Owed",
+            name="Weekly Tax Owed",
             value=f"**{format_game_number(tax_amount)}**",
             inline=False
         )
 
+        embed.set_footer(text="This uses 12h income as the full weekly tax.")
         await ctx.send(embed=embed)
 
     except asyncio.TimeoutError:
-        await ctx.send("⏰ Took too long.")
+        await ctx.send("⏰ Took too long. Type `.taxcalculate` again.")
+    except ValueError as e:
+        await ctx.send(f"❌ Invalid number format: {e}")
     except Exception as e:
         await ctx.send(f"❌ Error: {e}")
 
 
-@bot.command(name='leaderboard')
-async def leaderboard(ctx):
-    if not is_commands_channel(ctx):
-        await ctx.send("❌ This command can only be used in the **#commands** channel!")
-        return
-    
-    if not db_ready:
-        await ctx.send("⏳ Database is still initializing, please wait a moment...")
-        return
-    
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id, xp, level FROM levels ORDER BY xp DESC LIMIT 10")
-
-    if not rows:
-        return await ctx.send("No users have XP yet!")
-
-    embed = discord.Embed(title="🏆 Server Level Leaderboard", color=0xFFD700)
-    desc = "\n".join(f"**#{i}** {ctx.guild.get_member(row['user_id']).display_name if ctx.guild.get_member(row['user_id']) else f'User {row['user_id']}'} — Level **{row['level']}** ({row['xp']:,} XP)" for i, row in enumerate(rows, 1))
-    embed.description = desc
-    await ctx.send(embed=embed)
-
-@bot.command(name='sigilsleaderboard')
-async def sigilsleaderboard(ctx):
-    if not is_commands_channel(ctx):
-        await ctx.send("❌ This command can only be used in the **#commands** channel!")
-        return
-    
-    if not db_ready:
-        await ctx.send("⏳ Database is still initializing, please wait a moment...")
-        return
-    
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id, sigils FROM levels ORDER BY sigils DESC LIMIT 10")
-
-    if not rows:
-        return await ctx.send("No users have sigils yet!")
-
-    embed = discord.Embed(title="🏆 Server Sigils Leaderboard", color=0xFFD700)
-    desc = "\n".join(f"**#{i}** {ctx.guild.get_member(row['user_id']).display_name if ctx.guild.get_member(row['user_id']) else f'User {row['user_id']}'} — Sigils: **{row['sigils']:,}**" for i, row in enumerate(rows, 1))
-    embed.description = desc
-    await ctx.send(embed=embed)
-
-# ====================== CALCULATORS ======================
 @bot.command(name='pcalculate')
 async def pcalculate(ctx):
     if not is_commands_channel(ctx):
-        await ctx.send("❌ This command can only be used in the **#commands** channel!")
-        return
-    await ctx.send("🔢 **Power Calculator started!**\n\n"
-                   "**1.** What is your **current power**?\n"
-                   "Example: `19.12T`, `5Qa`, `100Sx`, or just a number")
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
+
+    await ctx.send(
+        "🔢 **Power Calculator started!**\n\n"
+        "**1.** What is your **current power**?\n"
+        "Example: `19.12T`, `5Qa`, `100Sx`, or just a number"
+    )
 
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
@@ -970,31 +1148,35 @@ async def pcalculate(ctx):
         msg = await bot.wait_for('message', check=check, timeout=180)
         current = parse_game_number(msg.content)
 
-        await ctx.send("**2.** What is your **power gain per tick**?\n"
-                       "Example: `1.5Qa`, `25B`, `500T`")
+        await ctx.send(
+            "**2.** What is your **power gain per tick**?\n"
+            "Example: `1.5Qa`, `25B`, `500T`"
+        )
 
         msg = await bot.wait_for('message', check=check, timeout=180)
         gain_per_tick = parse_game_number(msg.content)
 
-        await ctx.send("**3.** What is your **tick rate** in seconds?\n"
-                       "Example: `0.264` or `0.264s`")
+        await ctx.send(
+            "**3.** What is your **tick rate** in seconds?\n"
+            "Example: `0.264` or `0.264s`"
+        )
 
         msg = await bot.wait_for('message', check=check, timeout=180)
         tick_rate = float(msg.content.strip().lower().replace("s", "").replace(" ", ""))
 
-        await ctx.send("**4.** What is your **goal power**?\n"
-                       "Example: `10Qa`, `100Sx`, `1.5Qi`")
+        await ctx.send(
+            "**4.** What is your **goal power**?\n"
+            "Example: `10Qa`, `100Sx`, `1.5Qi`"
+        )
 
         msg = await bot.wait_for('message', check=check, timeout=180)
         goal = parse_game_number(msg.content)
 
         if goal <= current:
-            await ctx.send("🎉 You have already reached or passed your goal!")
-            return
+            return await ctx.send("🎉 You have already reached or passed your goal!")
 
         if gain_per_tick <= 0 or tick_rate <= 0:
-            await ctx.send("❌ Gain per tick and tick rate must be greater than 0!")
-            return
+            return await ctx.send("❌ Gain per tick and tick rate must be greater than 0!")
 
         needed = goal - current
         ticks_needed = math.ceil(needed / gain_per_tick)
@@ -1003,11 +1185,11 @@ async def pcalculate(ctx):
         if total_seconds < 60:
             time_str = f"{total_seconds:.1f} seconds"
         elif total_seconds < 3600:
-            time_str = f"{total_seconds/60:.2f} minutes"
+            time_str = f"{total_seconds / 60:.2f} minutes"
         elif total_seconds < 86400:
-            time_str = f"{total_seconds/3600:.2f} hours"
+            time_str = f"{total_seconds / 3600:.2f} hours"
         else:
-            time_str = f"{total_seconds/86400:.2f} days"
+            time_str = f"{total_seconds / 86400:.2f} days"
 
         embed = discord.Embed(title="⏳ Time to Reach Power Goal", color=0x00ff88)
         embed.add_field(name="Current Power", value=format_game_number(current), inline=True)
@@ -1023,49 +1205,57 @@ async def pcalculate(ctx):
         await ctx.send("⏰ You took too long to reply. Type `.pcalculate` again.")
     except ValueError as e:
         await ctx.send(f"❌ Invalid number format: {e}\nPlease try `.pcalculate` again.")
-    except Exception:
-        await ctx.send("❌ Something went wrong.")
+    except Exception as e:
+        await ctx.send(f"❌ Something went wrong: {e}")
+
 
 @bot.command(name='tcalculate')
 async def tcalculate(ctx):
     if not is_commands_channel(ctx):
-        await ctx.send("❌ This command can only be used in the **#commands** channel!")
-        return
-    await ctx.send("🔢 **Token Calculator started!**\n\n"
-                   "**1.** What is your **current token count**?\n"
-                   "Example: `50000`, `25k`, `2.5M`, or just a number")
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
+
+    await ctx.send(
+        "🔢 **Token Calculator started!**\n\n"
+        "**1.** What is your **current token count**?\n"
+        "Example: `50000`, `25k`, `2.5M`, or just a number"
+    )
+
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
-    
+
     try:
         msg = await bot.wait_for('message', check=check, timeout=180)
         current_tokens = parse_game_number(msg.content)
 
-        await ctx.send("**2.** How many **tokens do you earn per tick**?\n"
-                       "Example: `150`, `2500`, `27162`")
-        
+        await ctx.send(
+            "**2.** How many **tokens do you earn per tick**?\n"
+            "Example: `150`, `2500`, `27162`"
+        )
+
         msg = await bot.wait_for('message', check=check, timeout=180)
         tokens_per_tick = parse_game_number(msg.content)
 
-        await ctx.send("**3.** What is your **tick rate** (speed)?\n"
-                       "Example: `32s`, `60`, `35.5s`")
+        await ctx.send(
+            "**3.** What is your **tick rate** (speed)?\n"
+            "Example: `32s`, `60`, `35.5s`"
+        )
 
         msg = await bot.wait_for('message', check=check, timeout=180)
         tick_rate = float(msg.content.strip().lower().replace("s", "").replace(" ", ""))
 
-        await ctx.send("**4.** How many **tokens do you need** (goal)?\n"
-                       "Example: `50000`, `605K`, `32.5M`")
+        await ctx.send(
+            "**4.** How many **tokens do you need** (goal)?\n"
+            "Example: `50000`, `605K`, `32.5M`"
+        )
 
         msg = await bot.wait_for('message', check=check, timeout=180)
         goal = parse_game_number(msg.content)
 
         if goal <= current_tokens:
-            await ctx.send("🎉 You have already reached or passed your goal!")
-            return
+            return await ctx.send("🎉 You have already reached or passed your goal!")
 
         if tokens_per_tick <= 0 or tick_rate <= 0:
-            await ctx.send("❌ Tokens per tick and tick rate must be greater than 0!")
-            return
+            return await ctx.send("❌ Tokens per tick and tick rate must be greater than 0!")
 
         needed = goal - current_tokens
         ticks_needed = math.ceil(needed / tokens_per_tick)
@@ -1074,11 +1264,11 @@ async def tcalculate(ctx):
         if total_seconds < 60:
             time_str = f"{total_seconds:.1f} seconds"
         elif total_seconds < 3600:
-            time_str = f"{total_seconds/60:.2f} minutes"
+            time_str = f"{total_seconds / 60:.2f} minutes"
         elif total_seconds < 86400:
-            time_str = f"{total_seconds/3600:.2f} hours"
+            time_str = f"{total_seconds / 3600:.2f} hours"
         else:
-            time_str = f"{total_seconds/86400:.2f} days"
+            time_str = f"{total_seconds / 86400:.2f} days"
 
         embed = discord.Embed(title="⏳ Time to Reach Token Goal", color=0x0099ff)
         embed.add_field(name="Current Tokens", value=format_game_number(current_tokens), inline=True)
@@ -1094,8 +1284,9 @@ async def tcalculate(ctx):
         await ctx.send("⏰ You took too long to reply. Type `.tcalculate` again.")
     except ValueError as e:
         await ctx.send(f"❌ Invalid number format: {e}\nPlease try `.tcalculate` again.")
-    except Exception:
-        await ctx.send("❌ Something went wrong.")
-        
+    except Exception as e:
+        await ctx.send(f"❌ Something went wrong: {e}")
+
+
 # ====================== RUN BOT ======================
 bot.run(TOKEN)

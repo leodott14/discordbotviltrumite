@@ -1077,7 +1077,7 @@ async def taxcalculate(ctx):
 
         await ctx.send(
             "**2.** How many **tokens do you earn per tick**?\n"
-            "Examples: `23126`, `52106`, `95732`, `500K`, `2M`"
+            "Examples: `23126`, `52106`, `95732`"
         )
 
         msg = await bot.wait_for("message", check=check, timeout=180)
@@ -1102,16 +1102,15 @@ async def taxcalculate(ctx):
         tax_reduction = await get_tax_reduction(ctx.author.id)
         final_tax_rate = max(base_tax_rate - (tax_reduction / 100), 0)
 
-        # Full week earnings shown for reference.
+        # Estimated full week earnings.
         week_seconds = 7 * 24 * 60 * 60
         week_ticks = week_seconds / tick_rate
         weekly_income = week_ticks * tokens_per_tick
 
-        # Actual weekly tax is based on 12 hours of income.
+        # Weekly tax is exactly 12 hours of income.
         tax_seconds = 12 * 60 * 60
         tax_ticks = tax_seconds / tick_rate
-        tax_base_income = tax_ticks * tokens_per_tick
-        tax_amount = tax_base_income * final_tax_rate
+        tax_amount = tax_ticks * tokens_per_tick
 
         embed = discord.Embed(title="💰 Weekly Tax Calculation", color=0xffd700)
 
@@ -1130,18 +1129,12 @@ async def taxcalculate(ctx):
         )
 
         embed.add_field(
-            name="12h Income Used for Tax",
-            value=format_game_number(tax_base_income),
-            inline=False
-        )
-
-        embed.add_field(
             name="Weekly Tax Owed",
             value=f"**{format_game_number(tax_amount)}**",
             inline=False
         )
 
-        embed.set_footer(text="Weekly tax is calculated from 12 hours of income.")
+        embed.set_footer(text="Weekly tax is exactly 12 hours of your income.")
         await ctx.send(embed=embed)
 
     except asyncio.TimeoutError:

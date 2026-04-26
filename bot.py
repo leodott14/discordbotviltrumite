@@ -181,6 +181,46 @@ ROLE_PRIORITY = {
     "Viltrumite": 1
 }
 
+SHOP_PING_ID = 526915800154505227
+
+class ShopView(discord.ui.View):
+    def __init__(self, user_id):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        return interaction.user.id == self.user_id
+
+    @discord.ui.button(label="🎟️ 1 Week Gamepass (50k)", style=discord.ButtonStyle.green)
+    async def buy_gamepass(self, interaction: discord.Interaction, button: discord.ui.Button):
+        balance = await get_sigils(self.user_id)
+
+        if balance < 50000:
+            return await interaction.response.send_message("❌ Not enough sigils!", ephemeral=True)
+
+        await update_sigils(self.user_id, -50000)
+
+        await interaction.response.send_message("✅ Purchased 1 Week Gamepass!", ephemeral=True)
+
+        channel = interaction.channel
+        await channel.send(f"<@{SHOP_PING_ID}> 🛒 {interaction.user.mention} bought **1 Week Gamepass**!")
+
+    @discord.ui.button(label="📉 -1% Tax (20k)", style=discord.ButtonStyle.blurple)
+    async def buy_tax(self, interaction: discord.Interaction, button: discord.ui.Button):
+        balance = await get_sigils(self.user_id)
+
+        if balance < 20000:
+            return await interaction.response.send_message("❌ Not enough sigils!", ephemeral=True)
+
+        await update_sigils(self.user_id, -20000)
+
+        # you can later store this in DB if you want stacking
+        await interaction.response.send_message("✅ Purchased -1% Tax Reduction!", ephemeral=True)
+
+        channel = interaction.channel
+        await channel.send(f"<@{SHOP_PING_ID}> 📉 {interaction.user.mention} bought **-1% Tax Reduction**!")
+
+
 class BlackjackView(discord.ui.View):
     def __init__(self, ctx, bet, player_hand, dealer_hand):
         super().__init__(timeout=60)
@@ -361,29 +401,29 @@ def is_commands_channel(ctx):
     return ctx.channel.name.lower() == "commands"
 
 # ====================== COMMANDS ======================
-@bot.command(name='help')
-async def help_command(ctx):
-    if not is_commands_channel(ctx):
-        await ctx.send("❌ This command can only be used in the **#commands** channel!")
-        return
-    
-    embed = discord.Embed(title="🤖 Viltrumite Bot", description="Power, Token, Leveling system & Sigils", color=0x00ff88)
-    embed.add_field(name="📋 Available Commands", value="`.pcalculate` - Power time calculator\n"
-      "`.tcalculate` - Token time calculator\n"
-      "`.rank` - Show your current level & progress\n"
-      "`.leaderboard` - Top 10 users on the server\n"
-      "`.sigils` - Check your Iron Sigils balance\n"
-      "`.daily` - Claim your daily Iron Sigils\n"
-      "`.sigilsinfo` - How sigils work from donations\n"
-      "`.milestones` - All donation milestone rewards\n"
-      "`.checksigils` - Check your sigils balance\n"
-      "`.gamble` - Gamble your sigils for a chance to win more!\n"
-      "`.slots` - Play a slots game\n"
-      "`.blackjack` - Play a game of blackjack\n",
-      inline=False)
-    embed.set_footer(text="If something is unclear please don't refrain to ask.")
-    await ctx.send(embed=embed)
+embed = discord.Embed(
+    title="🤖 Viltrumite Bot",
+    description="Systems & Commands",
+    color=0x00ff88
+)
 
+embed.add_field(
+    name="📊 Rank Commands",
+    value="`.rank`\n`.leaderboard`",
+    inline=False
+)
+
+embed.add_field(
+    name="🛡️ Sigils Commands",
+    value="`.sigils`\n`.daily`\n`.gamble`\n`.checksigils`\n`.shop`\n`.sigilsleaderboard`",
+    inline=False
+)
+
+embed.add_field(
+    name="🧮 Calculators",
+    value="`.pcalculate`\n`.tcalculate`\n`.taxcalculate`",
+    inline=False
+)
 # ====================== SIGILS INFO COMMAND ======================
 @bot.command(name='sigilsinfo')
 async def sigilsinfo(ctx):
@@ -778,6 +818,97 @@ async def blackjack(ctx, amount: str):
     view = BlackjackView(ctx, bet, player_hand, dealer_hand)
 
     await ctx.send(embed=view.get_embed(), view=view)
+
+@bot.command(name="shop")
+async def shop(ctx):
+    if not is_commands_channel(ctx):
+        return await ctx.send("❌ Use this in #commands")
+
+    embed = discord.Embed(
+        title="🛒 Sigil Shop",
+        description="Spend your sigils on rewards",
+        color=0x00ff88
+    )
+
+    embed.add_field(
+        name="🎟️ Gamepass",
+        value="**50,000 Sigils** → 1 Week Titan/Deluxe",
+        inline=False
+    )
+
+    embed.add_field(
+        name="📉 Tax Reduction",
+        value="**20,000 Sigils** → -1% Tax",
+        inline=False
+    )
+
+    embed.set_footer(text="Click a button below to purchase")
+
+    await ctx.send(embed=embed, view=ShopView(ctx.author.id))
+
+@bot.command(name="taxcalculate")
+async def taxcalculate(ctx):
+    if not is_commands_channel(ctx):
+        return await ctx.send("❌ Use this in #commands")
+
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+
+    try:
+        await ctx.send("**1. What is your rank?**\n(low / elite / veteran)")
+
+        msg = await bot.wait_for("message", check=check, timeout=60)
+        rank = msg.content.lower()
+
+        if "elite" in rank:
+            tax_rate = 0.05
+        elif "veteran" in rank:
+            tax_rate = 0.03
+        else:
+            tax_rate = 0.07  # low tier
+
+        await ctx.send("**2. Tokens per tick?** (e.g. 500K, 2M)")
+
+        msg = await bot.wait_for("message", check=check, timeout=60)
+        tokens_per_tick = parse_game_number(msg.content)
+
+        await ctx.send("**3. Tick rate (seconds)?** (usually ~30)")
+
+        msg = await bot.wait_for("message", check=check, timeout=60)
+        tick_rate = float(msg.content.replace("s", "").strip())
+
+        # 16 hours = 57600 seconds
+        total_ticks = 57600 / tick_rate
+        total_income = total_ticks * tokens_per_tick
+
+        tax_amount = total_income * tax_rate
+
+        embed = discord.Embed(
+            title="💰 Tax Calculation",
+            color=0xffd700
+        )
+
+        embed.add_field(name="Rank", value=rank.title(), inline=True)
+        embed.add_field(name="Tax Rate", value=f"{int(tax_rate*100)}%", inline=True)
+
+        embed.add_field(
+            name="Total Earned (16h)",
+            value=format_game_number(total_income),
+            inline=False
+        )
+
+        embed.add_field(
+            name="Tax Owed",
+            value=f"**{format_game_number(tax_amount)}**",
+            inline=False
+        )
+
+        await ctx.send(embed=embed)
+
+    except asyncio.TimeoutError:
+        await ctx.send("⏰ Took too long.")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {e}")
 
 
 @bot.command(name='leaderboard')

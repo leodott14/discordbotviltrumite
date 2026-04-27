@@ -1273,24 +1273,23 @@ async def taxcalculate(ctx):
         week_ticks = week_seconds / tick_rate
         weekly_income = week_ticks * tokens_per_tick
 
-        # Hidden weekly tax base: 7 hours of income.
+        # Weekly tax is 7 hours of income.
         tax_seconds = 7 * 60 * 60
         tax_ticks = tax_seconds / tick_rate
-        tax_base_income = tax_ticks * tokens_per_tick
+        tax_before_reduction = tax_ticks * tokens_per_tick
 
-        # Apply rank tax rate and reductions.
-        final_tax_rate = max(base_tax_rate - (tax_reduction / 100), 0)
-        tax_amount = tax_base_income * final_tax_rate
+        # Tax reductions lower the 7h tax amount.
+        tax_amount = tax_before_reduction * (1 - (tax_reduction / 100))
 
         embed = discord.Embed(title="💰 Weekly Tax Calculation", color=0xffd700)
 
         embed.add_field(name="Rank", value=rank_name, inline=True)
         embed.add_field(name="Base Tax Rate", value=f"{base_tax_rate * 100:.0f}%", inline=True)
-        embed.add_field(name="Tax Reduction", value=f"-{format_percent(tax_reduction)}", inline=True)
+        embed.add_field(name="Tax Reduction", value=f"-{tax_reduction:g}%", inline=True)
 
-        embed.add_field(name="Final Tax Rate", value=f"{final_tax_rate * 100:.1f}%", inline=True)
         embed.add_field(name="Tokens per Tick", value=format_game_number(tokens_per_tick), inline=True)
         embed.add_field(name="Tick Rate", value=f"{tick_rate:g}s", inline=True)
+        embed.add_field(name="Tax Time", value="7 hours", inline=True)
 
         embed.add_field(
             name="Estimated 1 Week Earnings",
@@ -1304,7 +1303,7 @@ async def taxcalculate(ctx):
             inline=False
         )
 
-        embed.set_footer(text="Rank tax rate and reductions are applied automatically.")
+        embed.set_footer(text="Weekly tax is 7 hours of income. Tax reductions lower that amount.")
         await ctx.send(embed=embed)
 
     except asyncio.TimeoutError:

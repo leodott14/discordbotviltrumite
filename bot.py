@@ -597,14 +597,21 @@ async def help_command(ctx):
         value=(
             "`.sigils` — Check your sigils\n"
             "`.daily` — Claim daily sigils\n"
-            "`.gamble <amount>` — Gamble sigils\n"
-            "`.slots <amount>` — Play slots\n"
-            "`.blackjack <amount>` — Play blackjack\n"
             "`.checksigils @user` — Check someone’s sigils\n"
             "`.sigilsleaderboard` — View sigils leaderboard\n"
             "`.sigilsinfo` — Info about earning sigils\n"
             "`.milestones` — View milestone rewards\n"
             "`.shop` — Redeem sigils"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🎰 Gambling Commands",
+        value=(
+            "`.gamble <amount>` — Gamble sigils\n"
+            "`.slots <amount>` — Play slots\n"
+            "`.blackjack <amount>` — Play blackjack"
         ),
         inline=False
     )
@@ -630,6 +637,7 @@ async def help_command(ctx):
     )
 
     embed.set_footer(text="Use these commands in #commands")
+
     await ctx.send(embed=embed)
 
 
@@ -1306,6 +1314,61 @@ async def taxcalculate(ctx):
     except Exception as e:
         await ctx.send(f"❌ Something went wrong: {e}")
 
+
+@bot.command(name="tax")
+async def tax(ctx):
+    if not is_commands_channel(ctx):
+        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
+
+    if not db_ready:
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
+
+    tax_reduction = await get_tax_reduction(ctx.author.id)
+
+    embed = discord.Embed(
+        title="📉 Your Tax Information",
+        description=f"{ctx.author.mention}, here is your current tax info:",
+        color=0x00ff88
+    )
+
+    embed.add_field(
+        name="Your Tax Reduction",
+        value=f"**-{tax_reduction:g}%**",
+        inline=False
+    )
+
+    embed.add_field(
+        name="How Tax Works",
+        value=(
+            "Your weekly tax is calculated using your rank tax rate.\n"
+            "Any tax reductions you have will lower that rate."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="Rank Tax Rates",
+        value=(
+            "`Low Tier` → **7%**\n"
+            "`Viltrumite` → **6%**\n"
+            "`Elite` → **5%**\n"
+            "`Veteran Viltrumite` → **3%**"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="Tax Reductions",
+        value=(
+            "**20,000 Sigils** in `.shop` → one-time **-1% tax reduction**\n"
+            "Contribution milestones can also reduce taxes for the next week."
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text="Use .taxcalculate to calculate your weekly tax.")
+
+    await ctx.send(embed=embed)
 
 @bot.command(name='pcalculate')
 async def pcalculate(ctx):

@@ -42,14 +42,27 @@ async def init_db():
                         level INT DEFAULT 1,
                         sigils BIGINT DEFAULT 0,
                         last_daily TEXT,
-                        tax_reduction INT DEFAULT 0
+                        tax_reduction DOUBLE PRECISION DEFAULT 0,
+                        bought_tax_upgrade BOOLEAN DEFAULT FALSE
                     )
                 """)
 
                 # Keeps older databases from breaking if the table already existed before this update.
                 await conn.execute("""
                     ALTER TABLE levels
-                    ADD COLUMN IF NOT EXISTS tax_reduction INT DEFAULT 0
+                    ADD COLUMN IF NOT EXISTS tax_reduction DOUBLE PRECISION DEFAULT 0
+                """)
+
+                # Convert older INT tax_reduction columns to decimal-compatible type.
+                await conn.execute("""
+                    ALTER TABLE levels
+                    ALTER COLUMN tax_reduction TYPE DOUBLE PRECISION USING tax_reduction::DOUBLE PRECISION
+                """)
+
+                # Tracks whether the user already bought the one-time shop tax upgrade.
+                await conn.execute("""
+                    ALTER TABLE levels
+                    ADD COLUMN IF NOT EXISTS bought_tax_upgrade BOOLEAN DEFAULT FALSE
                 """)
 
             db_ready = True
@@ -83,8 +96,8 @@ async def get_user_level(user_id: int):
         if row is None:
             await conn.execute(
                 """
-                INSERT INTO levels (user_id, xp, level, sigils, last_daily, tax_reduction)
-                VALUES ($1, 0, 1, 0, NULL, 0)
+                INSERT INTO levels (user_id, xp, level, sigils, last_daily, tax_reduction, bought_tax_upgrade)
+                VALUES ($1, 0, 1, 0, NULL, 0, FALSE)
                 """,
                 user_id
             )
@@ -142,10 +155,10 @@ async def get_tax_reduction(user_id: int):
             user_id
         )
 
-    return row["tax_reduction"] if row else 0
+    return float(row["tax_reduction"]) if row and row["tax_reduction"] is not None else 0.0
 
 
-async def set_tax_reduction(user_id: int, amount: int = 1):
+async def set_tax_reduction(user_id: int, amount: float = 1):
     await get_user_level(user_id)
 
     async with db_pool.acquire() as conn:
@@ -156,6 +169,48 @@ async def set_tax_reduction(user_id: int, amount: int = 1):
             WHERE user_id = $2
             """,
             amount,
+            user_id
+        )
+
+
+async def add_tax_reduction(user_id: int, amount: float = 1):
+    await get_user_level(user_id)
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE levels
+            SET tax_reduction = tax_reduction + $1
+            WHERE user_id = $2
+            """,
+            amount,
+            user_id
+        )
+
+
+async def has_bought_tax_upgrade(user_id: int):
+    await get_user_level(user_id)
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT bought_tax_upgrade FROM levels WHERE user_id = $1",
+            user_id
+        )
+
+    return bool(row["bought_tax_upgrade"]) if row else False
+
+
+async def set_bought_tax_upgrade(user_id: int, bought: bool = True):
+    await get_user_level(user_id)
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE levels
+            SET bought_tax_upgrade = $1
+            WHERE user_id = $2
+            """,
+            bought,
             user_id
         )
 
@@ -238,6 +293,12 @@ def progress_bar(current, total, length=10):
     return "█" * filled + "░" * (length - filled)
 
 
+def format_percent(value: float) -> str:
+    if float(value).is_integer():
+        return f"{int(value)}%"
+    return f"{value:.1f}%"
+
+
 # ====================== BOT SETUP ======================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -304,9 +365,9 @@ class ShopView(discord.ui.View):
 
     @discord.ui.button(label="📉 -1% Tax — 20k", style=discord.ButtonStyle.blurple)
     async def buy_tax(self, interaction: discord.Interaction, button: discord.ui.Button):
-        already_bought = await get_tax_reduction(self.user_id)
+        already_bought = await has_bought_tax_upgrade(self.user_id)
 
-        if already_bought >= 1:
+        if already_bought:
             return await interaction.response.send_message(
                 "❌ You already purchased the **-1% Tax Reduction**. This is a one-time purchase only.",
                 ephemeral=True
@@ -318,10 +379,13 @@ class ShopView(discord.ui.View):
             return await interaction.response.send_message("❌ Not enough sigils!", ephemeral=True)
 
         await update_sigils(self.user_id, -20000)
-        await set_tax_reduction(self.user_id, 1)
+        await add_tax_reduction(self.user_id, 1)
+        await set_bought_tax_upgrade(self.user_id, True)
+
+        total_reduction = await get_tax_reduction(self.user_id)
 
         await interaction.response.send_message(
-            "✅ Purchased **-1% Tax Reduction**! This one-time upgrade is now active.",
+            f"✅ Purchased **-1% Tax Reduction**! Total tax reduction: **-{format_percent(total_reduction)}**",
             ephemeral=True
         )
 
@@ -402,7 +466,7 @@ async def on_command_error(ctx, error):
         return
 
     if isinstance(error, commands.MissingRequiredArgument):
-        return await ctx.send(f"❌ Missing argument. Use `.help` to see commands.")
+        return await ctx.send("❌ Missing argument. Use `.help` to see commands.")
 
     if isinstance(error, commands.BadArgument):
         return await ctx.send("❌ Invalid argument. Check your command and try again.")
@@ -428,6 +492,10 @@ async def on_message(message):
     global last_sheet_message
 
     if message.author.bot:
+        return
+
+    if not message.guild:
+        await bot.process_commands(message)
         return
 
     # Sheet-register reminder.
@@ -555,7 +623,8 @@ async def help_command(ctx):
         name="🛠️ Admin Commands",
         value=(
             "`.give @user <amount>` — Give sigils\n"
-            "`.xpgive @user <amount>` — Give XP"
+            "`.xpgive @user <amount>` — Give XP\n"
+            "`.taxreduce @user <amount>` — Give tax reduction"
         ),
         inline=False
     )
@@ -572,33 +641,55 @@ async def sigilsinfo(ctx):
 
     embed = discord.Embed(
         title="🛡️ Sigils Information",
-        description="**How to earn Sigils from Token Donations**",
+        description="**How to earn and redeem Sigils**",
         color=0x00ff88
     )
 
     embed.add_field(
         name="💰 Main Rule",
-        value="For every **1,000,000 (1M)** donated tokens you receive **100 Sigils**.",
+        value="You can earn Sigils by reaching weekly point contribution milestones or using the `.daily` command.",
         inline=False
     )
 
     embed.add_field(
-        name="🏆 Milestones",
+        name="🏆 Sigil Milestones",
         value=(
-            "You also get **bonus sigils** when you hit these contribution milestones:\n"
-            "• `100k` • `350k` • `500k` • `700k` • `1M` • `1.5M`\n"
-            "Type `.milestones` to see exactly how many sigils each milestone gives!"
+            "`500K` contributions → **+100 Sigils**\n"
+            "`1M` contributions → **+100 Sigils**\n"
+            "`1.5M` contributions → **+100 Sigils**\n"
+            "`2M` contributions → **+100 Sigils**\n"
+            "`3M` contributions → **+100 Sigils**"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="📉 Tax Reduction Milestones",
+        value=(
+            "`1.5M` contributions → **-0.5% tax next week**\n"
+            "`2.5M` contributions → **-0.5% tax next week**\n"
+            "`3M` contributions → **-0.5% tax next week**\n"
+            "`5M` contributions → **-0.5% tax next week**"
         ),
         inline=False
     )
 
     embed.add_field(
         name="🔄 Redemption",
-        value="Once you reach **50,000 (50k) Sigils**, you can redeem **1 week of Titan or Deluxe Gamepass**.",
+        value=(
+            "**50,000 Sigils** → 1 week of **Titan** or **Deluxe Gamepass**\n"
+            "**20,000 Sigils** → one-time **-1% tax reduction**"
+        ),
         inline=False
     )
 
-    embed.set_footer(text="To donate tokens, go to #redeem-sigils and check the pinned message for instructions.")
+    embed.add_field(
+        name="📸 Proof Required",
+        value="Post proof/screenshots in **#redeem-sigils-n-taxes** to claim rewards.",
+        inline=False
+    )
+
+    embed.set_footer(text="To donate points, go to #redeem-sigils-n-taxes and check the pinned message for instructions.")
     await ctx.send(embed=embed)
 
 
@@ -608,21 +699,41 @@ async def milestones(ctx):
         return await ctx.send("❌ This command can only be used in the **#commands** channel!")
 
     embed = discord.Embed(
-        title="🏆 Token Contribution Milestones",
-        description="Every time you hit one of these totals in contribution towards the clan.",
+        title="🏆 Points Contribution Milestones",
+        description="Weekly rewards for contributing points towards the clan.",
         color=0x00ff88
     )
 
-    embed.add_field(name="100K", value="**+40 Sigils**", inline=True)
-    embed.add_field(name="350K", value="**+125 Sigils**", inline=True)
-    embed.add_field(name="500K", value="**+175 Sigils**", inline=True)
-    embed.add_field(name="700K", value="**+250 Sigils**", inline=True)
-    embed.add_field(name="1M", value="**+300 Sigils**", inline=True)
-    embed.add_field(name="1.5M", value="**+400 Sigils**", inline=True)
+    embed.add_field(
+        name="🛡️ Sigil Earning Milestones",
+        value=(
+            "`500K` contributions → **+100 Sigils**\n"
+            "`1M` contributions → **+100 Sigils**\n"
+            "`1.5M` contributions → **+100 Sigils**\n"
+            "`2M` contributions → **+100 Sigils**\n"
+            "`3M` contributions → **+100 Sigils**"
+        ),
+        inline=False
+    )
 
-    embed.add_field(name="💡 Note", value="Milestones are weekly bonuses.", inline=False)
-    embed.set_footer(text="Send a screenshot of your clan contributions at every milestone reached.")
+    embed.add_field(
+        name="📉 Next Week Tax Reduction Milestones",
+        value=(
+            "`1.5M` contributions → **-0.5% tax next week**\n"
+            "`2.5M` contributions → **-0.5% tax next week**\n"
+            "`3M` contributions → **-0.5% tax next week**\n"
+            "`5M` contributions → **-0.5% tax next week**"
+        ),
+        inline=False
+    )
 
+    embed.add_field(
+        name="📸 Proof Required",
+        value="Post proof/screenshots in **#redeem-sigils-n-taxes** to claim your rewards.",
+        inline=False
+    )
+
+    embed.set_footer(text="Milestones reset weekly.")
     await ctx.send(embed=embed)
 
 
@@ -666,6 +777,36 @@ async def give(ctx, member: discord.Member, amount: int):
     await ctx.send(embed=embed)
 
 
+@bot.command(name="taxreduce")
+@commands.has_permissions(administrator=True)
+async def taxreduce(ctx, member: discord.Member, amount: float = 0.5):
+    if not db_ready:
+        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
+
+    if amount <= 0:
+        return await ctx.send("❌ Amount must be greater than 0!")
+
+    if amount > 10:
+        return await ctx.send("❌ Max tax reduction you can give at once is 10%.")
+
+    await add_tax_reduction(member.id, amount)
+    new_reduction = await get_tax_reduction(member.id)
+
+    embed = discord.Embed(
+        title="📉 Tax Reduction Given",
+        description=f"{member.mention} received **-{format_percent(amount)} tax reduction**.",
+        color=0x00ff88
+    )
+
+    embed.add_field(
+        name="Total Tax Reduction",
+        value=f"**-{format_percent(new_reduction)}**",
+        inline=False
+    )
+
+    await ctx.send(embed=embed)
+
+
 @bot.command()
 async def daily(ctx):
     if not is_commands_channel(ctx):
@@ -679,8 +820,8 @@ async def daily(ctx):
 
     async with db_pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO levels (user_id, xp, level, sigils, last_daily, tax_reduction)
-            VALUES ($1, 0, 1, 0, NULL, 0)
+            INSERT INTO levels (user_id, xp, level, sigils, last_daily, tax_reduction, bought_tax_upgrade)
+            VALUES ($1, 0, 1, 0, NULL, 0, FALSE)
             ON CONFLICT (user_id) DO NOTHING
         """, ctx.author.id)
 
@@ -731,7 +872,7 @@ async def gamble(ctx, amount: str):
     if bet > balance:
         return await ctx.send(f"❌ You only have **{balance:,} 🛡️ Sigils**!")
 
-    win_chance = 0.42
+    win_chance = 0.44
     multiplier = 2
     roll = random.random()
 
@@ -916,7 +1057,7 @@ async def slots(ctx, amount: str):
         return await ctx.send(f"❌ You only have {balance:,} 🛡️ Sigils!")
 
     emojis = ["🍒", "🍋", "🍇", "💎", "⭐", "7️⃣"]
-    weights = [35, 30, 22, 8, 4, 1]
+    weights = [32, 28, 22, 10, 6, 2]
 
     reel1 = random.choices(emojis, weights=weights, k=1)[0]
     reel2 = random.choices(emojis, weights=weights, k=1)[0]
@@ -925,28 +1066,42 @@ async def slots(ctx, amount: str):
     result = f"{reel1} | {reel2} | {reel3}"
 
     if reel1 == reel2 == reel3:
-        if reel1 == "💎":
+        if reel1 == "7️⃣":
+            multiplier = 7
+        elif reel1 == "💎":
             multiplier = 6
-        elif reel1 == "7️⃣":
-            multiplier = 5
         elif reel1 == "⭐":
-            multiplier = 4
+            multiplier = 5
         else:
             multiplier = 3
 
         winnings = bet * multiplier
-        await update_sigils(ctx.author.id, winnings - bet)
+        profit = winnings - bet
+
+        await update_sigils(ctx.author.id, profit)
 
         embed = discord.Embed(
             title="🎰 BIG WIN!",
-            description=f"**{result}**\nYou won **{winnings:,} 🛡️ Sigils!**",
+            description=(
+                f"**{result}**\n"
+                f"You won **{winnings:,} 🛡️ Sigils!**\n"
+                f"Profit: **+{profit:,} 🛡️ Sigils**"
+            ),
             color=0x00ff88
         )
 
     elif reel1 == reel2 or reel2 == reel3 or reel1 == reel3:
+        profit = int(bet * 0.25)
+
+        await update_sigils(ctx.author.id, profit)
+
         embed = discord.Embed(
-            title="😐 Neutral Spin",
-            description=f"**{result}**\nNo win, no loss.",
+            title="🎰 Pair Win!",
+            description=(
+                f"**{result}**\n"
+                f"You got **2 matching symbols**!\n"
+                f"You earned **25% of your bet**: **+{profit:,} 🛡️ Sigils**"
+            ),
             color=0xffd700
         )
 
@@ -1004,8 +1159,9 @@ async def shop(ctx):
 
     balance = await get_sigils(ctx.author.id)
     tax_reduction = await get_tax_reduction(ctx.author.id)
+    bought_tax_upgrade = await has_bought_tax_upgrade(ctx.author.id)
 
-    tax_status = "✅ Purchased" if tax_reduction >= 1 else "❌ Not purchased"
+    tax_status = "✅ Purchased" if bought_tax_upgrade else "❌ Not purchased"
 
     embed = discord.Embed(
         title="🛒 Sigil Shop",
@@ -1027,12 +1183,15 @@ async def shop(ctx):
 
     embed.add_field(
         name="📉 One-Time Tax Reduction",
-        value=f"Cost: **20,000 Sigils** → **-1% Tax**\nStatus: **{tax_status}**",
+        value=(
+            f"Cost: **20,000 Sigils** → **-1% Tax**\n"
+            f"Shop Status: **{tax_status}**\n"
+            f"Total Tax Reduction: **-{format_percent(tax_reduction)}**"
+        ),
         inline=False
     )
 
     embed.set_footer(text="Click a button below to purchase")
-
     await ctx.send(embed=embed, view=ShopView(ctx.author.id))
 
 
@@ -1106,22 +1265,24 @@ async def taxcalculate(ctx):
         week_ticks = week_seconds / tick_rate
         weekly_income = week_ticks * tokens_per_tick
 
-        # Weekly tax starts as exactly 8 hours of income.
-        # The -1% shop upgrade removes 1% from that 8h tax.
-        tax_seconds = 7.5 * 60 * 60
+        # Hidden weekly tax base: 7 hours of income.
+        tax_seconds = 7 * 60 * 60
         tax_ticks = tax_seconds / tick_rate
-        tax_before_reduction = tax_ticks * tokens_per_tick
-        tax_amount = tax_before_reduction * (1 - (tax_reduction / 100))
+        tax_base_income = tax_ticks * tokens_per_tick
+
+        # Apply rank tax rate and reductions.
+        final_tax_rate = max(base_tax_rate - (tax_reduction / 100), 0)
+        tax_amount = tax_base_income * final_tax_rate
 
         embed = discord.Embed(title="💰 Weekly Tax Calculation", color=0xffd700)
 
         embed.add_field(name="Rank", value=rank_name, inline=True)
         embed.add_field(name="Base Tax Rate", value=f"{base_tax_rate * 100:.0f}%", inline=True)
-        embed.add_field(name="Tax Reduction", value=f"-{tax_reduction}%", inline=True)
+        embed.add_field(name="Tax Reduction", value=f"-{format_percent(tax_reduction)}", inline=True)
 
+        embed.add_field(name="Final Tax Rate", value=f"{final_tax_rate * 100:.1f}%", inline=True)
         embed.add_field(name="Tokens per Tick", value=format_game_number(tokens_per_tick), inline=True)
         embed.add_field(name="Tick Rate", value=f"{tick_rate:g}s", inline=True)
-        embed.add_field(name="8h Tax Before Reduction", value=format_game_number(tax_before_reduction), inline=True)
 
         embed.add_field(
             name="Estimated 1 Week Earnings",
@@ -1135,7 +1296,7 @@ async def taxcalculate(ctx):
             inline=False
         )
 
-        embed.set_footer(text="Weekly tax is 8 hours of income. The shop upgrade reduces that by 1%.")
+        embed.set_footer(text="Rank tax rate and reductions are applied automatically.")
         await ctx.send(embed=embed)
 
     except asyncio.TimeoutError:
@@ -1144,6 +1305,8 @@ async def taxcalculate(ctx):
         await ctx.send(f"❌ Invalid number format: {e}\nPlease try `.taxcalculate` again.")
     except Exception as e:
         await ctx.send(f"❌ Something went wrong: {e}")
+
+
 @bot.command(name='pcalculate')
 async def pcalculate(ctx):
     if not is_commands_channel(ctx):

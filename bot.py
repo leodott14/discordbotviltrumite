@@ -1306,7 +1306,7 @@ async def taxcalculate(ctx):
 
         embed.add_field(
             name="7h Income",
-            value=format_game_number(seven_hour_income),
+            value=f"**{format_game_number(seven_hour_income)}**",
             inline=True
         )
 

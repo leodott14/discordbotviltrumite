@@ -1273,24 +1273,30 @@ async def taxcalculate(ctx):
         week_ticks = week_seconds / tick_rate
         weekly_income = week_ticks * tokens_per_tick
 
-        # Weekly tax is based on 7 hours of income.
+        # Tax uses 7 hours of income.
         tax_seconds = 7 * 60 * 60
         tax_ticks = tax_seconds / tick_rate
-        tax_before_rate = tax_ticks * tokens_per_tick
+        seven_hour_income = tax_ticks * tokens_per_tick
 
-        # Apply rank tax rate first, then tax reductions.
-        rank_tax_amount = tax_before_rate * base_tax_rate
-        tax_amount = rank_tax_amount * (1 - (tax_reduction / 100))
+        # Tax reduction subtracts from the rank tax rate.
+        final_tax_rate = max(base_tax_rate - (tax_reduction / 100), 0)
 
-        embed = discord.Embed(title="💰 Weekly Tax Calculation", color=0xffd700)
+        tax_from_rank_rate = seven_hour_income * base_tax_rate
+        final_tax_amount = seven_hour_income * final_tax_rate
+        saved_from_reduction = tax_from_rank_rate - final_tax_amount
+
+        embed = discord.Embed(
+            title="💰 Weekly Tax Calculation",
+            color=0xffd700
+        )
 
         embed.add_field(name="Rank", value=rank_name, inline=True)
-        embed.add_field(name="Base Tax Rate", value=f"{base_tax_rate * 100:.0f}%", inline=True)
+        embed.add_field(name="Base Tax Rate", value=f"{base_tax_rate * 100:.1f}%", inline=True)
         embed.add_field(name="Tax Reduction", value=f"-{tax_reduction:g}%", inline=True)
 
+        embed.add_field(name="Final Tax Rate", value=f"{final_tax_rate * 100:.1f}%", inline=True)
         embed.add_field(name="Tokens per Tick", value=format_game_number(tokens_per_tick), inline=True)
         embed.add_field(name="Tick Rate", value=f"{tick_rate:g}s", inline=True)
-        embed.add_field(name="Tax Time", value="7 hours", inline=True)
 
         embed.add_field(
             name="Estimated 1 Week Earnings",
@@ -1299,164 +1305,36 @@ async def taxcalculate(ctx):
         )
 
         embed.add_field(
-            name="7h Income Before Tax Rate",
-            value=format_game_number(tax_before_rate),
-            inline=False
+            name="7h Income",
+            value=format_game_number(seven_hour_income),
+            inline=True
         )
 
         embed.add_field(
-            name="Tax After Rank Rate",
-            value=format_game_number(rank_tax_amount),
-            inline=False
+            name=f"Tax From Base Rate ({base_tax_rate * 100:.1f}%)",
+            value=format_game_number(tax_from_rank_rate),
+            inline=True
         )
 
         embed.add_field(
-            name="Weekly Tax Owed",
-            value=f"**{format_game_number(tax_amount)}**",
+            name=f"Saved From Reduction ({tax_reduction:g}%)",
+            value=format_game_number(saved_from_reduction),
+            inline=True
+        )
+
+        embed.add_field(
+            name="Final Weekly Tax Owed",
+            value=f"**{format_game_number(final_tax_amount)}**",
             inline=False
         )
 
-        embed.set_footer(text="Weekly tax is 7h income × rank tax rate, then reductions lower it.")
+        embed.set_footer(text="Tax = 7h income × final tax rate. Reductions subtract from your rank tax rate.")
         await ctx.send(embed=embed)
 
     except asyncio.TimeoutError:
         await ctx.send("⏰ You took too long to reply. Type `.taxcalculate` again.")
     except ValueError as e:
         await ctx.send(f"❌ Invalid number format: {e}\nPlease try `.taxcalculate` again.")
-    except Exception as e:
-        await ctx.send(f"❌ Something went wrong: {e}")
-
-        
-@bot.command(name="tax")
-async def tax(ctx):
-    if not is_commands_channel(ctx):
-        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
-
-    if not db_ready:
-        return await ctx.send("⏳ Database is still initializing, please wait a moment...")
-
-    tax_reduction = await get_tax_reduction(ctx.author.id)
-
-    embed = discord.Embed(
-        title="📉 Your Tax Information",
-        description=f"{ctx.author.mention}, here is your current tax info:",
-        color=0x00ff88
-    )
-
-    embed.add_field(
-        name="Your Tax Reduction",
-        value=f"**-{tax_reduction:g}%**",
-        inline=False
-    )
-
-    embed.add_field(
-        name="How Tax Works",
-        value=(
-            "Your weekly tax is calculated using your rank tax rate.\n"
-            "Any tax reductions you have will lower that rate."
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="Rank Tax Rates",
-        value=(
-            "`Low Tier` → **7%**\n"
-            "`Viltrumite` → **6%**\n"
-            "`Elite` → **5%**\n"
-            "`Veteran Viltrumite` → **3%**"
-        ),
-        inline=False
-    )
-
-    embed.add_field(
-        name="Tax Reductions",
-        value=(
-            "**20,000 Sigils** in `.shop` → one-time **-1% tax reduction**\n"
-            "Contribution milestones can also reduce taxes for the next week."
-        ),
-        inline=False
-    )
-
-    embed.set_footer(text="Use .taxcalculate to calculate your weekly tax.")
-
-    await ctx.send(embed=embed)
-
-@bot.command(name='pcalculate')
-async def pcalculate(ctx):
-    if not is_commands_channel(ctx):
-        return await ctx.send("❌ This command can only be used in the **#commands** channel!")
-
-    await ctx.send(
-        "🔢 **Power Calculator started!**\n\n"
-        "**1.** What is your **current power**?\n"
-        "Example: `19.12T`, `5Qa`, `100Sx`, or just a number"
-    )
-
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel
-
-    try:
-        msg = await bot.wait_for('message', check=check, timeout=180)
-        current = parse_game_number(msg.content)
-
-        await ctx.send(
-            "**2.** What is your **power gain per tick**?\n"
-            "Example: `1.5Qa`, `25B`, `500T`"
-        )
-
-        msg = await bot.wait_for('message', check=check, timeout=180)
-        gain_per_tick = parse_game_number(msg.content)
-
-        await ctx.send(
-            "**3.** What is your **tick rate** in seconds?\n"
-            "Example: `0.264` or `0.264s`"
-        )
-
-        msg = await bot.wait_for('message', check=check, timeout=180)
-        tick_rate = float(msg.content.strip().lower().replace("s", "").replace(" ", ""))
-
-        await ctx.send(
-            "**4.** What is your **goal power**?\n"
-            "Example: `10Qa`, `100Sx`, `1.5Qi`"
-        )
-
-        msg = await bot.wait_for('message', check=check, timeout=180)
-        goal = parse_game_number(msg.content)
-
-        if goal <= current:
-            return await ctx.send("🎉 You have already reached or passed your goal!")
-
-        if gain_per_tick <= 0 or tick_rate <= 0:
-            return await ctx.send("❌ Gain per tick and tick rate must be greater than 0!")
-
-        needed = goal - current
-        ticks_needed = math.ceil(needed / gain_per_tick)
-        total_seconds = ticks_needed * tick_rate
-
-        if total_seconds < 60:
-            time_str = f"{total_seconds:.1f} seconds"
-        elif total_seconds < 3600:
-            time_str = f"{total_seconds / 60:.2f} minutes"
-        elif total_seconds < 86400:
-            time_str = f"{total_seconds / 3600:.2f} hours"
-        else:
-            time_str = f"{total_seconds / 86400:.2f} days"
-
-        embed = discord.Embed(title="⏳ Time to Reach Power Goal", color=0x00ff88)
-        embed.add_field(name="Current Power", value=format_game_number(current), inline=True)
-        embed.add_field(name="Gain per Tick", value=format_game_number(gain_per_tick), inline=True)
-        embed.add_field(name="Tick Rate", value=f"{tick_rate} s", inline=True)
-        embed.add_field(name="Goal Power", value=format_game_number(goal), inline=True)
-        embed.add_field(name="Ticks Needed", value=f"{ticks_needed:,}", inline=False)
-        embed.add_field(name="Estimated Time", value=f"**{time_str}**", inline=False)
-
-        await ctx.send(embed=embed)
-
-    except asyncio.TimeoutError:
-        await ctx.send("⏰ You took too long to reply. Type `.pcalculate` again.")
-    except ValueError as e:
-        await ctx.send(f"❌ Invalid number format: {e}\nPlease try `.pcalculate` again.")
     except Exception as e:
         await ctx.send(f"❌ Something went wrong: {e}")
 

@@ -1273,13 +1273,14 @@ async def taxcalculate(ctx):
         week_ticks = week_seconds / tick_rate
         weekly_income = week_ticks * tokens_per_tick
 
-        # Weekly tax is 7 hours of income.
+        # Weekly tax is based on 7 hours of income.
         tax_seconds = 7 * 60 * 60
         tax_ticks = tax_seconds / tick_rate
-        tax_before_reduction = tax_ticks * tokens_per_tick
+        tax_before_rate = tax_ticks * tokens_per_tick
 
-        # Tax reductions lower the 7h tax amount.
-        tax_amount = tax_before_reduction * (1 - (tax_reduction / 100))
+        # Apply rank tax rate first, then tax reductions.
+        rank_tax_amount = tax_before_rate * base_tax_rate
+        tax_amount = rank_tax_amount * (1 - (tax_reduction / 100))
 
         embed = discord.Embed(title="💰 Weekly Tax Calculation", color=0xffd700)
 
@@ -1298,12 +1299,24 @@ async def taxcalculate(ctx):
         )
 
         embed.add_field(
+            name="7h Income Before Tax Rate",
+            value=format_game_number(tax_before_rate),
+            inline=False
+        )
+
+        embed.add_field(
+            name="Tax After Rank Rate",
+            value=format_game_number(rank_tax_amount),
+            inline=False
+        )
+
+        embed.add_field(
             name="Weekly Tax Owed",
             value=f"**{format_game_number(tax_amount)}**",
             inline=False
         )
 
-        embed.set_footer(text="Weekly tax is 7 hours of income. Tax reductions lower that amount.")
+        embed.set_footer(text="Weekly tax is 7h income × rank tax rate, then reductions lower it.")
         await ctx.send(embed=embed)
 
     except asyncio.TimeoutError:
@@ -1313,7 +1326,7 @@ async def taxcalculate(ctx):
     except Exception as e:
         await ctx.send(f"❌ Something went wrong: {e}")
 
-
+        
 @bot.command(name="tax")
 async def tax(ctx):
     if not is_commands_channel(ctx):

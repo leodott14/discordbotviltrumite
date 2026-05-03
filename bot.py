@@ -1284,7 +1284,7 @@ async def taxcalculate(ctx):
         tax_from_rank_rate = seven_hour_income * base_tax_rate
         final_tax_amount = seven_hour_income * final_tax_rate
         saved_from_reduction = tax_from_rank_rate - final_tax_amount
-        final_amount_after_tax = seven_hour_income - final_tax_amount
+        final_amount_after_tax = seven_hour_income + final_tax_amount
 
         embed = discord.Embed(
             title="💰 Weekly Tax Calculation",
